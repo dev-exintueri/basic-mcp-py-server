@@ -104,6 +104,35 @@ async def test_successful_request_logs_once_at_info_with_masked_subject(caplog) 
     assert "sha256:" in lines[0]
 
 
+async def test_control_characters_in_the_path_cannot_forge_a_log_line(caplog) -> None:
+    """경로에 넣은 CR/LF 로 로그 줄을 위조하거나 숨길 수 있으면 안 된다.
+
+    httpx 를 거치면 URL 정규화가 제어 문자를 먼저 없애 버리므로, 미들웨어를
+    직접 부른다. 이 줄이 그대로 나가면 두 가지가 가능해진다: \\n 은 진짜와
+    구별되지 않는 가짜 줄을 만들고(위조), \\r 은 SSE 프레이밍(줄 나누기가
+    \\n 기준이다)을 깨서 그 줄을 관리 화면에서 통째로 지운다(은폐).
+    """
+    caplog.set_level(logging.INFO, logger="mcp_test_server.http")
+
+    async def inner(scope, receive, send) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+
+    async def sink(message) -> None:
+        return None
+
+    forged = "/mcp\n2026-07-25T00:00:00Z ERROR app 가짜\r숨김"
+    await AccessLogMiddleware(inner)(
+        {"type": "http", "method": "GET", "path": forged}, None, sink
+    )
+
+    lines = http_lines(caplog)
+    assert len(lines) == 1
+    assert "\n" not in lines[0]
+    assert "\r" not in lines[0]
+    assert "\\n" in lines[0]
+    assert "\\r" in lines[0]
+
+
 async def test_lifespan_scope_passes_through_untouched(caplog) -> None:
     """이 규칙을 어기면 인수 테스트 전부가 멈춘다."""
     caplog.set_level(logging.INFO, logger="mcp_test_server.http")

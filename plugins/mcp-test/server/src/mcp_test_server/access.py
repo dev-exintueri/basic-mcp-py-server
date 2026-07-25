@@ -69,5 +69,13 @@ class AccessLogMiddleware:
         if info.get("reason"):
             parts.append(f"reason={info['reason']}")
 
+        # 줄바꿈을 이스케이프한 뒤에 넘긴다. path 와 instance 는 클라이언트가
+        # 정하는 값이고 마스킹도 걸리지 않는다. 날것으로 두면 요청 하나로
+        # 진짜와 구별되지 않는 로그 줄을 만들어 넣을 수 있고(위조), CR 은 그보다
+        # 나쁘다 — SSE 프레이밍은 \n 만 나누므로 \r 이 든 줄은 관리 화면에서
+        # 통째로 사라진다(은폐). 토큰 없이도 되는 일이라 401 로 거부된 요청에도
+        # 해당한다. 조립이 끝난 줄에 한 번만 걸어 어느 필드로 들어오든 막는다.
+        line = " ".join(parts).replace("\r", "\\r").replace("\n", "\\n")
+
         level = logging.WARNING if status >= 400 else logging.INFO
-        logger.log(level, " ".join(parts))
+        logger.log(level, line)
