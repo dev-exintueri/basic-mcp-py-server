@@ -36,7 +36,11 @@
 | `userConfig` 값은 사용자 단위(`~/.claude/settings.json`)로 저장된다 | `docs/claude-base/plugins-reference.md:593` |
 | 플러그인은 마켓플레이스 캐시(`~/.claude/plugins/cache`)로 복사된다 | `docs/claude-base/plugins-reference.md:769` |
 | 마켓플레이스는 저장소 루트의 `.claude-plugin/marketplace.json`, 상대 경로 `source`는 마켓플레이스 루트 기준 | `https://code.claude.com/docs/en/plugin-marketplaces` |
+| `headersHelper`는 **연결마다 한 번**, 세션 시작과 재연결 시점에 실행되며 stdout의 JSON을 연결 헤더에 병합한다. 캐싱은 없다 | `docs/claude-base/mcp.md:749`, `:783` |
+| 도구 호출이 **401 또는 403**을 받으면 Claude Code가 헬퍼를 다시 실행해 새 헤더로 재연결하고 호출을 한 번 재시도한다 (v2.1.193 이상) | `docs/claude-base/mcp.md:785` |
+| 플러그인이 제공하는 `headersHelper`는 `${user_config.*}`를 참조할 수 없다. 그 값은 `headers`에 넣으라고 문서가 지시한다 | `docs/claude-base/mcp.md:799` |
 | `streamable_http_app()`은 `/mcp` 라우트와 lifespan을 포함한 Starlette 앱을 반환하고, 핸들러는 `Context`로 원본 요청 헤더에 접근한다 | `modelcontextprotocol/python-sdk` 문서 |
+| **MCP `2026-07-28` 개정판에는 핸드셰이크도 세션도 없다.** 모든 요청이 독립 POST이고 `Mcp-Session-Id`가 발급되지 않는다. 세션 ID는 구버전 경로에만 존재한다 | `modelcontextprotocol/python-sdk` `docs/whats-new.md`, `docs/run/deploy.md` |
 
 마켓플레이스 규격 문서(`plugin-marketplaces`)는 현재 `docs/claude-base/`에 없다. 이번 설계에서는 공식 문서를 직접 받아 확인했다. 미러에 추가할지는 별도 판단 사항이다.
 
@@ -64,9 +68,24 @@ stdio는 세션마다 서버 프로세스를 새로 띄우므로 요구사항 2�
 
 관리 포트는 **`127.0.0.1`에 고정 바인딩하며 설정으로 변경할 수 없다.** 공백만 아니면 통과하는 인증과 상태를 바꿀 수 있는 포트가 외부에 함께 열려서는 안 된다.
 
+### 세션 식별은 `Mcp-Session-Id`가 아니라 `headersHelper`가 발급하는 연결 ID로
+
+이 설계에서 가장 중요한 결정이다.
+
+MCP `2026-07-28` 개정판에는 세션이 없다. 모든 요청이 독립 POST이고 `Mcp-Session-Id`가 발급되지 않는다. 따라서 전송 계층의 세션 ID로 클라이언트를 추적하는 설계는 클라이언트가 어느 프로토콜 버전을 쓰느냐에 따라 통째로 무너진다. 구버전 경로에서만 동작하고, 신버전에서는 모든 요청이 미지의 클라이언트로 보인다.
+
+대신 `headersHelper`를 쓴다. 이 헬퍼는 **연결마다 한 번, 세션 시작과 재연결 시점에** 실행되므로, 여기서 난수 ID를 발급하면 그 연결의 모든 요청에 같은 값이 실린다. 프로토콜의 세션 유무와 무관하다.
+
+부수 효과가 둘 있다.
+
+- 식별자가 **요청 헤더**에만 존재하므로 응답 헤더를 가로챌 필요가 없다. 스트리밍 응답과 미들웨어가 얽히는 문제가 발생하지 않는다.
+- 차단 응답을 403으로 하면 Claude Code가 헬퍼를 다시 실행해 **새 연결 ID로 재연결하고 호출을 재시도한다.** 재연결 테스트가 우리가 기대하는 동작이 아니라 문서에 명시된 자동 동작이 된다.
+
+`Mcp-Session-Id`는 요청 헤더에 있으면 참고 정보로 기록하되, 식별에는 쓰지 않는다.
+
 ### 세션 차단은 자체 미들웨어로
 
-SDK 내부 세션 매니저를 조작해 세션을 끊는 것은 공개 API가 아니라 버전에 취약하다. 우리 미들웨어가 관리하는 차단 목록으로 구현하면 SDK 버전에 묶이지 않고, 클라이언트가 보는 결과는 같다.
+SDK 내부 세션 매니저를 조작하는 것은 공개 API가 아니라 버전에 취약하고, 위 이유로 애초에 세션이 없을 수도 있다. 우리 미들웨어가 연결 ID 차단 목록을 관리하면 SDK 버전에도 프로토콜 버전에도 묶이지 않는다.
 
 ## 아키텍처
 
@@ -87,6 +106,8 @@ basic-mcp-py-server/
 │       ├── hooks/
 │       │   ├── hooks.json            SessionStart 훅 선언
 │       │   └── check-server.sh       CLAUDE_PLUGIN_OPTION_* 를 읽는 예시
+│       ├── scripts/
+│       │   └── connection-id.sh      headersHelper — 연결마다 고유 ID 발급
 │       └── server/
 │           ├── pyproject.toml
 │           ├── README.md
@@ -119,7 +140,7 @@ MCP 앱은 `streamable_http_app()`이 반환하는 Starlette 앱을 최상위 �
 | 모듈 | 책임 | 의존 |
 |---|---|---|
 | `registry.py` | 세션 레코드와 차단 집합을 보유하는 **유일한 상태 보유자**. 등록·갱신·제거·stale 판정·차단·차단 해제 | 없음 |
-| `auth.py` | Starlette 미들웨어. 인증 헤더 검사, 차단 세션 거절, 세션 ID 추출 후 레지스트리 갱신 | `registry` |
+| `auth.py` | Starlette 미들웨어. 인증 헤더 검사, 차단된 연결 거절, 요청 헤더에서 연결 ID 추출 후 레지스트리 갱신 | `registry` |
 | `mcp_server.py` | FastMCP 인스턴스와 도구 4개. `Context`로 요청 헤더를 읽는다 | `registry` |
 | `admin.py` | 관리 포트 Starlette 앱. HTML 페이지, `/api/status`, 차단 엔드포인트 | `registry` |
 | `app.py` | 두 앱 조립과 동시 기동, 포트 충돌 처리, stale 스윕 태스크 | 위 전부 |
@@ -127,15 +148,20 @@ MCP 앱은 `streamable_http_app()`이 반환하는 Starlette 앱을 최상위 �
 
 `registry.py` 외에는 상태를 갖지 않는다. 두 앱이 같은 이벤트 루프에서 돌므로 별도의 락은 두지 않는다.
 
+### 용어
+
+이 문서에서 **세션**은 하나의 Claude Code 연결을 뜻한다. MCP 프로토콜의 세션이 아니라, `headersHelper`가 발급한 연결 ID 하나에 대응하는 단위다. 사용자가 터미널에서 `claude`를 하나 띄우면 세션 하나다.
+
 ### 세션 레코드
 
 ```python
 @dataclass
 class SessionRecord:
-    session_id: str        # Mcp-Session-Id
-    subject: str           # Authorization Bearer 토큰 문자열 그대로
-    project: str           # X-Client-Project (${CLAUDE_PROJECT_DIR})
-    label: str             # X-Client-Label (${MCP_TEST_LABEL:-unnamed})
+    instance_id: str            # X-Client-Instance — 유일한 식별자
+    subject: str                # Authorization Bearer 토큰 문자열 그대로
+    project: str                # X-Client-Project (${CLAUDE_PROJECT_DIR})
+    label: str                  # X-Client-Label (${MCP_TEST_LABEL:-unnamed})
+    mcp_session_id: str | None  # 구버전 경로에서만 존재. 참고용
     connected_at: datetime
     last_seen: datetime
     call_count: int
@@ -152,8 +178,8 @@ class SessionRecord:
 |---|---|---|---|
 | `ping` | 없음 | 서버 PID, uptime, 현재 세션 수 | 여러 세션이 같은 PID를 보면 프로세스 공유가 증명된다 |
 | `echo` | `text: str` | 같은 문자열 | 인자 왕복 |
-| `whoami` | 없음 | 내 세션 ID, subject, project, label, 연결 시각, 호출 수 | 헤더 치환 3종이 실제로 서버에 도달했는지 |
-| `sessions` | 없음 | 전체 세션 목록 (ID, subject, project, label, 연결 시각, 마지막 호출, stale 여부) | 멀티세션 관찰 |
+| `whoami` | 없음 | 내 연결 ID, subject, project, label, 연결 시각, 호출 수 | 헤더 4종이 실제로 서버에 도달했는지 |
+| `sessions` | 없음 | 전체 세션 목록 (연결 ID, subject, project, label, 연결 시각, 마지막 호출, stale 여부) | 멀티세션 관찰 |
 
 `sessions`는 토큰 문자열을 그대로 노출한다. 테스트 서버이고 토큰이 곧 식별자이므로 의도된 동작이다.
 
@@ -210,15 +236,42 @@ auth.py 미들웨어: Bearer 뒤 문자열 strip() → 비어 있으면 401
         "Authorization":    "Bearer ${user_config.auth_token}",
         "X-Client-Project": "${CLAUDE_PROJECT_DIR}",
         "X-Client-Label":   "${MCP_TEST_LABEL:-unnamed}"
-      }
+      },
+      "headersHelper": "${CLAUDE_PLUGIN_ROOT}/scripts/connection-id.sh"
     }
   }
 }
 ```
 
-한 파일에 세 가지 치환이 모두 들어간다 — 플러그인 설정, 경로 플레이스홀더, 환경변수 확장.
+`headers` 한 곳에 세 가지 치환이 모두 들어간다 — 플러그인 설정, 경로 플레이스홀더, 환경변수 확장.
 
-`userConfig` 값은 사용자 단위로 저장되므로 같은 머신의 두 세션은 **같은 토큰**을 보낸다. 세션 구분은 서버가 발급하는 `Mcp-Session-Id`가 담당하고, 사람이 읽을 구분자는 세션마다 다른 `X-Client-Project`가 제공한다. 한 프로젝트 안에서 여러 세션을 구분하려면 `MCP_TEST_LABEL`을 세션별로 다르게 주고 `claude`를 실행한다.
+인증 토큰을 `headers`에 두고 `headersHelper`에 두지 않은 것은 의도적이다. 플러그인이 제공하는 헬퍼는 셸을 거치므로 `${user_config.*}`를 참조할 수 없고, 문서가 그 값은 `headers`에 넣으라고 명시한다 (`mcp.md:799`).
+
+### 연결 ID 발급
+
+```sh
+# plugins/mcp-test/scripts/connection-id.sh
+#!/bin/sh
+id=$(uuidgen 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())')
+printf '{"X-Client-Instance": "%s"}\n' "$(printf '%s' "$id" | tr -d '-' | cut -c1-12)"
+```
+
+헬퍼는 연결마다 한 번 실행되므로 이 값은 그 연결이 유지되는 동안 고정이고, 연결이 새로 맺어지면 바뀐다. `uuidgen`이 없는 환경을 위해 `python3` 대체 경로를 둔다 — 서버 자체가 Python을 요구하므로 둘 중 하나는 반드시 있다.
+
+동적 헤더는 같은 이름의 정적 헤더를 덮어쓰지만, `X-Client-Instance`는 정적 `headers`에 없으므로 충돌하지 않는다.
+
+### 왜 이 식별자가 필요한가
+
+`userConfig` 값은 사용자 단위로 저장되므로 같은 머신의 모든 세션이 **같은 토큰**을 보낸다. `X-Client-Project`도 같은 프로젝트에서 띄운 두 세션이면 같다. 즉 헤더 치환만으로는 세션을 구분할 수 없다.
+
+| 구분자 | 다른 프로젝트의 두 세션 | **같은 프로젝트의 두 세션** |
+|---|---|---|
+| `Authorization` | 같음 | 같음 |
+| `X-Client-Project` | 다름 | **같음** |
+| `X-Client-Label` | 사용자가 `MCP_TEST_LABEL`을 다르게 준 경우에만 다름 | 위와 같음 |
+| `X-Client-Instance` | **다름** | **다름** |
+
+`X-Client-Instance`만이 모든 경우에 세션을 구분한다. 사람이 읽을 이름을 붙이고 싶으면 `MCP_TEST_LABEL`을 세션별로 다르게 주고 `claude`를 실행한다.
 
 ### 검사 규칙
 
@@ -274,10 +327,12 @@ Bearer 뒤 문자열이 strip() 후 빈 문자열 → 401
 
 ## 세션 추적
 
-`auth.py` 미들웨어가 담당한다. SDK 내부 세션 매니저는 건드리지 않는다.
+`auth.py` 미들웨어가 담당한다. SDK 내부 세션 매니저는 건드리지 않고, **요청 헤더만** 읽는다.
 
-- 세션 ID는 요청 헤더 `Mcp-Session-Id`에서 읽는다. 초기화 요청에는 없으므로, 그때는 응답 헤더에서 읽어 등록한다.
-- 요청이 통과할 때마다 `last_seen`과 `call_count`를 갱신한다.
+- 식별자는 요청 헤더 `X-Client-Instance`다. 모든 요청에 실려 오므로 초기화 요청을 특별 취급할 필요가 없고, 응답을 들여다볼 필요도 없다.
+- 처음 보는 값이면 레코드를 만들고, 이미 있으면 `last_seen`과 `call_count`를 갱신한다.
+- `Mcp-Session-Id`가 요청 헤더에 있으면 레코드에 기록한다. 구버전 경로에서만 채워지며, 식별에는 쓰지 않는다.
+- `X-Client-Instance`가 없는 요청은 헬퍼가 없거나 실패한 경우다. 거절하지 않고 `unknown`으로 묶어 기록한다. 관리 페이지에 그렇게 표시되면 헬퍼 설정을 의심하라는 신호다.
 - `DELETE /mcp`를 받으면 레코드를 제거한다.
 - `last_seen`이 5분을 넘긴 세션은 **제거하지 않고** stale로 표시한다. 유휴 세션이 목록에서 사라지면 오히려 상태 파악이 어렵다. 24시간을 넘기면 스윕 태스크가 제거한다.
 
@@ -289,25 +344,32 @@ Bearer 뒤 문자열이 strip() 후 빈 문자열 → 401
 |---|---|---|
 | `GET` | `/` | 상태 HTML 페이지. 5초 자동 새로고침 |
 | `GET` | `/api/status` | 서버 정보와 세션 목록 JSON |
-| `POST` | `/api/sessions/{session_id}/block` | 해당 세션 차단 |
-| `POST` | `/api/sessions/{session_id}/unblock` | 차단 해제 |
+| `POST` | `/api/sessions/{instance_id}/block` | 해당 세션 차단 |
+| `POST` | `/api/sessions/{instance_id}/unblock` | 차단 해제 |
 
 HTML 페이지는 프레임워크 없이 서버가 렌더링한다. 차단 버튼은 폼 POST다.
 
 ### 차단 동작
 
-차단된 세션의 MCP 요청에는 `404`를 반환한다. MCP 규격상 404는 "그 세션이 존재하지 않는다"는 뜻이므로 클라이언트는 재초기화하고 **새 세션 ID로 다시 붙는다.** 영구 차단이 아니라 세션 만료와 재연결을 테스트하는 수단이다. 이 동작은 의도된 것이며 문서에 명시한다.
+차단된 연결 ID의 MCP 요청에는 **`403 Forbidden`**을 반환한다.
+
+Claude Code는 도구 호출이 401이나 403을 받으면 `headersHelper`를 다시 실행해 새 헤더로 재연결하고 호출을 한 번 재시도한다 (`mcp.md:785`). 헬퍼는 매번 새 ID를 발급하므로, 차단된 세션은 **새 연결 ID로 즉시 되살아난다.**
+
+영구 차단이 아니라 재연결 경로를 테스트하는 수단이다. 관리 페이지에서 차단을 누르면 그 레코드는 곧 사라지고 새 레코드가 나타난다 — 이것이 정상 동작이며 화면에 그렇게 안내한다.
+
+차단 상태를 유지해서 관찰하고 싶으면 차단 해제 전까지 해당 세션에서 도구를 호출하지 않으면 된다. 재시도는 도구 호출이 있어야 발생한다.
 
 ## 에러 처리
 
 | 상황 | 서버 동작 | 사용자가 보는 것 |
 |---|---|---|
-| `Authorization` 없음 / 공백만 | `401` + `WWW-Authenticate: Bearer` | `/mcp`에서 연결 실패 |
-| 차단된 세션의 요청 | `404` | 클라이언트가 재초기화, 새 세션으로 재연결 |
+| `Authorization` 없음 / 공백만 | `401` + `WWW-Authenticate: Bearer` | `/mcp`에서 연결 실패. 토큰이 계속 비어 있으면 재시도도 실패하고 인증 필요로 표시됨 |
+| 차단된 연결 ID의 요청 | `403` | Claude Code가 헬퍼를 재실행해 새 연결 ID로 재연결 후 재시도 |
+| `X-Client-Instance` 없음 | 통과 | `unknown`으로 기록. 관리 페이지에서 헬퍼 미설정 신호 |
 | 서버 미기동 | — | 연결 거부. `SessionStart` 훅이 기동 방법 안내 |
 | 포트 사용 중 | 기동 즉시 종료 (코드 1) | 어느 포트가 막혔는지 명시된 메시지 |
 | 관리 포트 외부 접근 | — | 루프백 바인딩이라 도달 불가 |
-| 알 수 없는 세션 ID로 차단 요청 | `404` + JSON 오류 | 관리 페이지에 메시지 |
+| 알 수 없는 연결 ID로 차단 요청 | `404` + JSON 오류 | 관리 페이지에 메시지 |
 
 도구 실행 중 예외는 FastMCP 기본 동작에 맡긴다. 별도로 감싸지 않는다.
 
@@ -317,13 +379,18 @@ HTML 페이지는 프레임워크 없이 서버가 렌더링한다. 차단 버�
 |---|---|---|
 | 단위 | `registry` 등록·갱신·stale 판정·제거·차단 | 순수 함수 테스트 |
 | 단위 | `auth` 미들웨어 — 헤더 없음/`Bearer` 없음/공백만/정상 | `httpx` ASGI 트랜스포트 |
-| 단위 | 차단된 세션 → 404 | 위와 동일 |
+| 단위 | 차단된 연결 ID → 403 | 위와 동일 |
+| 단위 | `X-Client-Instance` 없는 요청 → `unknown`으로 기록 | 위와 동일 |
+| 단위 | `connection-id.sh`가 유효한 JSON 한 줄을 내고, 두 번 실행하면 값이 다른지 | 스크립트 직접 실행 |
 | 통합 | 관리 API `/api/status`, 차단·해제 | `httpx` ASGI 트랜스포트 |
-| **인수** | **실제 MCP 클라이언트 2개를 같은 서버에 연결** → `sessions`에 둘 다 보이고 `ping`의 PID가 동일 | 서버를 실제 포트에 띄우고 MCP 파이썬 클라이언트로 접속 |
-| 인수 | 차단 후 클라이언트가 재초기화하고 새 세션 ID로 붙는지 | 위와 동일 |
-| 수동 | 서로 다른 디렉토리에서 `claude` 2개 실행 → `sessions` 2개, `X-Client-Project` 상이 | 체크리스트를 README에 기록 |
+| **인수** | **실제 MCP 클라이언트 2개를 서로 다른 `X-Client-Instance`로 같은 서버에 연결** → `sessions`에 둘 다 보이고 `ping`의 PID가 동일 | 서버를 실제 포트에 띄우고 MCP 파이썬 클라이언트로 접속 |
+| 인수 | 차단된 연결의 도구 호출이 403을 받는지 | 위와 동일. Claude Code의 자동 재시도는 클라이언트 측 동작이므로 여기서는 서버 응답까지만 검증한다 |
+| 수동 | **같은 디렉토리에서** `claude` 2개 실행 → `sessions` 2개, `X-Client-Instance` 상이 | 체크리스트를 README에 기록 |
+| 수동 | 관리 페이지에서 차단 → 해당 세션이 새 연결 ID로 되살아나는지 | 위와 동일 |
 
 인수 테스트가 이 프로젝트의 핵심이다. 요구사항 2·3이 실제로 성립하는지를 검증하는 유일한 테스트다.
+
+수동 검증을 **같은 디렉토리**에서 하는 것이 중요하다. 서로 다른 프로젝트에서 띄우면 `X-Client-Project`만으로도 구분되어, 연결 ID가 실제로 동작하는지 확인되지 않는다.
 
 ## 배포와 사용
 
