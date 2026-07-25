@@ -144,6 +144,16 @@ class AuthMiddleware:
             "reason": None,
         }
 
+        if scope["method"] == "DELETE":
+            # DELETE는 연결을 끊는 요청이지 새로 맺는 요청이 아니다. 아래
+            # "처음 보는 연결" 로그보다 먼저 갈라져야, 레지스트리가 모르는
+            # 인스턴스로 DELETE가 와도 "connected"가 찍히지 않는다 —
+            # remove()는 지울 레코드가 없으면 아무 일도 하지 않는데,
+            # 로그만 연결을 주장하면 감사 기록이 거짓말을 하는 셈이다.
+            self.registry.remove(identity.instance_id)
+            await self.app(scope, receive, send)
+            return
+
         if self.registry.get(identity.instance_id) is None:
             # 처음 보는 연결이다. touch 하면 레코드가 생겨 버리므로 그 전에 본다.
             registry_logger.info(
@@ -152,11 +162,6 @@ class AuthMiddleware:
                 mask_secret(identity.subject),
                 identity.label,
             )
-
-        if scope["method"] == "DELETE":
-            self.registry.remove(identity.instance_id)
-            await self.app(scope, receive, send)
-            return
 
         self.registry.touch(
             instance_id=identity.instance_id,

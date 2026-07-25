@@ -205,3 +205,23 @@ async def test_new_connection_is_logged_once_with_a_masked_subject(caplog) -> No
     assert "instance=i1" in lines[0]
     assert "alice" not in lines[0]
     assert "sha256:" in lines[0]
+
+
+async def test_delete_for_unseen_instance_does_not_log_connected(caplog) -> None:
+    """DELETE는 연결을 맺는 요청이 아니다. registry.get() 이 None인지 보는
+    "처음 보는 연결" 검사를 DELETE 분기보다 먼저 두면, 레지스트리가 모르는
+    인스턴스로 DELETE가 와도 connected 로그가 찍힌다 — remove() 는 지울
+    레코드가 없으면 아무것도 하지 않는데 감사 기록만 연결을 주장하는 셈이다.
+    """
+    import logging
+
+    caplog.set_level(logging.INFO, logger="mcp_test_server.registry")
+    registry = Registry()
+
+    async with build_client(registry) as client:
+        response = await client.request("DELETE", "/mcp", headers=FULL_HEADERS)
+
+    assert response.status_code == 200
+    assert registry.get("abc123") is None
+    lines = [r.getMessage() for r in caplog.records if r.name == "mcp_test_server.registry"]
+    assert lines == []
