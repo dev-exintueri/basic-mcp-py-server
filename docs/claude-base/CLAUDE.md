@@ -29,11 +29,11 @@ https://code.claude.com/docs/en/mcp.md   → 마크다운 원문 (76KB)
   source_html: https://code.claude.com/docs/en/mcp    # 사람이 볼 URL
   title: "Connect Claude Code to tools via MCP"       # 원문 제목 (영문 유지)
   category: mcp-core                                  # mcp-core|mcp-build|mcp-ops|concept
-  fetched: 2026-07-25                                 # 이 사본의 내용이 마지막으로 바뀐 날
+  fetched: 2026-07-25                                 # 이 사본이 마지막으로 갱신된 날
   summary: "…"                                        # 한국어 요약 (manifest.json에서 관리)
   ---
   ```
-  `fetched`는 "마지막으로 실행한 날"이 아니라 **"본문이 마지막으로 바뀐 날"**이다. 원문이 그대로면 갱신되지 않는다. 마지막 실행일은 `last-sync.txt`에 있다.
+  `fetched`는 **이 로컬 사본이 마지막으로 갱신된 날**이다 — 최초 수집일이거나, 이후 upstream 변경을 반영한 날. 원문이 그대로면 갱신되지 않으므로 "마지막으로 실행한 날"과는 다르다. 공식 문서가 실제로 언제 수정됐는지는 여기서 알 수 없다. 마지막 대조일은 `last-sync.txt`에 있다.
 
 ## 갱신
 
@@ -44,13 +44,15 @@ python3 docs/claude-base/sync.py            # 전체
 python3 docs/claude-base/sync.py mcp        # 특정 slug만
 ```
 
-`manifest.json`을 읽어 다시 받고 배너를 떼고 프론트매터를 붙인다. **본문이 upstream과 같으면 파일을 다시 쓰지 않는다.** 그래서 실행 후 `git status`에 뜨는 파일은 실제로 공식 문서가 바뀐 것뿐이고, `git diff docs/claude-base`가 곧 upstream 변경 내역이 된다. 한국어 `summary`는 `manifest.json`에 있으므로 항상 보존된다.
+`manifest.json`을 읽어 다시 받고 배너를 떼고 프론트매터를 붙인다. **본문이 upstream과 같으면 파일을 다시 쓰지 않는다.** 그래서 실행 후 `git status`에 뜨는 `.md` 파일은 실제로 공식 문서가 바뀐 것뿐이고, `git diff docs/claude-base/*.md`가 곧 upstream 변경 내역이 된다. 한국어 `summary`는 `manifest.json`에 있으므로 항상 보존된다.
+
+단 `last-sync.txt`는 실행 기록이라 날짜가 바뀌면 항상 갱신된다. 아무것도 안 바뀐 날의 실행도 이 파일 하나는 수정된 것으로 뜬다.
 
 실행 결과는 다음과 같이 요약된다. `last-sync.txt`에도 같은 내용이 남는다(전체 실행일 때만).
 
 ```
-[update] mcp.md                          76,109 bytes
-[fail  ] glossary.md                     404  (https://code.claude.com/docs/en/glossary.md)
+[update] mcp.md                           76,109 bytes
+[fail ] glossary.md                    404  (https://code.claude.com/docs/en/glossary.md)
 
 2026-07-25  updated=1  unchanged=18  failed=1
 
