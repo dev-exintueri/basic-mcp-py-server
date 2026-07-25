@@ -157,10 +157,11 @@ def build_servers(
     로거는 handlers=0, propagate=True 를 유지하므로 여전히 루트로 전파되지만,
     Config 생성자가 그때마다 이 로거의 레벨을 자기 log_level 로 다시 맞춘다 —
     나중에 만든 관리 쪽(warning)이 이겨 실제로는 WARNING 이상만 파일에 남는다.
-    uvicorn 의 기동 안내(INFO)는 걸러지지만 크래시로 뜨는 ERROR 는 그대로 남으므로
-    두 리스너 다 잃는 정보는 없다 — 기동 안내는 serve() 가 자기 print/logger로
-    이미 남긴다. access_log=False 인 이유는 AccessLogMiddleware 가 양쪽 앱에 대해
-    같은 형식으로 남기기 때문이다.
+    uvicorn 의 INFO 출력(기동 안내와 종료 진행 메시지)은 걸러지고, 크래시로 뜨는
+    ERROR 는 그대로 남는다. serve() 의 "서버 종료" 로그는 사후 요약이므로, 종료가
+    열린 커넥션에 막혔을 때 uvicorn 의 세부 진단 메시지를 대신하지 않는다.
+    access_log=False 인 이유는 AccessLogMiddleware 가 양쪽 앱에 대해 같은 형식으로
+    남기기 때문이다.
     """
     mcp_server = uvicorn.Server(
         uvicorn.Config(
