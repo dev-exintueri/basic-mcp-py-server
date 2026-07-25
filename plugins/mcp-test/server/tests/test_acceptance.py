@@ -8,8 +8,10 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 import pytest
@@ -42,11 +44,16 @@ async def _port_ready(host: str, port: int) -> bool:
     return True
 
 
-def _terminate_and_reap(proc: subprocess.Popen) -> str:
-    """자식 프로세스를 정리하고 지금까지 쌓인 출력을 반환한다.
+def _terminate_and_reap(proc: subprocess.Popen, log_path: Path) -> str:
+    """자식 프로세스를 정리하고 로그 파일에 쌓인 출력을 반환한다.
 
     실패 진단(진단표: 바인딩 실패, import 오류)이 타임아웃으로 뭉개지지
     않도록, 종료시키면서 stdout/stderr(합쳐서 리다이렉트됨)를 모은다.
+
+    두 번 불러도 안전하다 — 타임아웃 경로에서 한 번, 그 뒤 finally에서 또
+    한 번 불릴 수 있다. proc.wait()는 이미 회수된 프로세스에도 즉시
+    반환하고(returncode가 캐시돼 있으므로), 로그는 파이프가 아니라 파일에
+    쓰게 했으므로 여러 번 읽어도 스트림을 닫아버리는 부작용이 없다.
     """
     if proc.poll() is None:
         proc.terminate()
@@ -57,10 +64,10 @@ def _terminate_and_reap(proc: subprocess.Popen) -> str:
             proc.wait(timeout=5)
     else:
         proc.wait(timeout=5)
-    output = proc.stdout.read() if proc.stdout else ""
-    if proc.stdout:
-        proc.stdout.close()
-    return output
+    try:
+        return log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 @asynccontextmanager
@@ -138,58 +145,91 @@ async def test_two_real_processes_share_one_server():
     """
     port = free_port()
     admin_port = free_port()
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "mcp_test_server",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--admin-port",
-            str(admin_port),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+
+    # 자식의 stdout/stderr를 파이프가 아니라 파일에 받는다. 파이프는 이
+    # 테스트가 살아 있는 동안 비우지 않으므로, 로그가 OS 파이프 버퍼(보통
+    # 64KB)를 넘기면 자식이 쓰기에서 블록되고 이 테스트는 읽기를 기다리며
+    # 함께 멈추는 잠재적 교착 상태가 된다. 파일은 그런 한도가 없다.
+    fd, log_path_str = tempfile.mkstemp(prefix="mcp-test-server-", suffix=".log")
+    os.close(fd)
+    log_path = Path(log_path_str)
     try:
-        url = f"http://127.0.0.1:{port}/mcp"
+        with open(log_path, "wb") as log_file:
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "mcp_test_server",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                    "--admin-port",
+                    str(admin_port),
+                ],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+            )
+        try:
+            url = f"http://127.0.0.1:{port}/mcp"
 
-        # 포트를 폴링한다 — 고정 sleep이 아니라 자체 데드라인을 둬서,
-        # 바인딩 실패나 import 오류가 30초 타임아웃 뒤에 뭉개지지 않고
-        # 자기 원인 그대로 드러나게 한다.
-        deadline = time.monotonic() + 20.0
-        while True:
-            if proc.poll() is not None:
-                output = proc.stdout.read() if proc.stdout else ""
-                pytest.fail(
-                    "서버 프로세스가 준비되기 전에 종료됨 "
-                    f"(exit={proc.returncode}):\n{output}"
-                )
-            if await _port_ready("127.0.0.1", port):
-                break
-            if time.monotonic() > deadline:
-                output = _terminate_and_reap(proc)
-                pytest.fail(f"서버가 20초 안에 포트를 열지 않음:\n{output}")
-            await asyncio.sleep(0.05)
+            # 포트를 폴링한다 — 고정 sleep이 아니라 자체 데드라인을 둬서,
+            # 바인딩 실패나 import 오류가 30초 타임아웃 뒤에 뭉개지지 않고
+            # 자기 원인 그대로 드러나게 한다.
+            deadline = time.monotonic() + 20.0
+            while True:
+                if proc.poll() is not None:
+                    output = _terminate_and_reap(proc, log_path)
+                    pytest.fail(
+                        "서버 프로세스가 준비되기 전에 종료됨 "
+                        f"(exit={proc.returncode}):\n{output}"
+                    )
+                if await _port_ready("127.0.0.1", port):
+                    break
+                if time.monotonic() > deadline:
+                    output = _terminate_and_reap(proc, log_path)
+                    pytest.fail(f"서버가 20초 안에 포트를 열지 않음:\n{output}")
+                await asyncio.sleep(0.05)
 
-        async with client_for(url, "inst-left", "left") as left:
-            async with client_for(url, "inst-right", "right") as right:
-                left_ping = payload(await left.call_tool("ping", {}))
-                right_ping = payload(await right.call_tool("ping", {}))
+            async with client_for(url, "inst-left", "left") as left:
+                async with client_for(url, "inst-right", "right") as right:
+                    left_ping = payload(await left.call_tool("ping", {}))
+                    right_ping = payload(await right.call_tool("ping", {}))
 
-                # 두 클라이언트가 같은 (별도) 프로세스를 본다
-                assert left_ping["pid"] == right_ping["pid"]
-                # 그 프로세스가 이 테스트 자신이 아니라 진짜 별도 프로세스다
-                assert left_ping["pid"] != os.getpid()
+                    # 두 클라이언트가 같은 (별도) 프로세스를 본다
+                    assert left_ping["pid"] == right_ping["pid"]
+                    # 그 프로세스가 이 테스트 자신이 아니라 진짜 별도 프로세스다
+                    assert left_ping["pid"] != os.getpid()
 
-                listing = payload(await left.call_tool("sessions", {}))
-                ids = {s["instance_id"] for s in listing["sessions"]}
-                assert {"inst-left", "inst-right"} <= ids
+                    listing = payload(await left.call_tool("sessions", {}))
+                    ids = {s["instance_id"] for s in listing["sessions"]}
+                    assert {"inst-left", "inst-right"} <= ids
+        finally:
+            _terminate_and_reap(proc, log_path)
     finally:
-        _terminate_and_reap(proc)
+        log_path.unlink(missing_ok=True)
+
+
+def test_terminate_and_reap_is_idempotent(tmp_path):
+    """`_terminate_and_reap`을 두 번 불러도 안전한지 직접 증명한다.
+
+    실패 진단 경로(타임아웃)에서 한 번 부르고 finally에서 또 한 번 부르는
+    구조이므로, 두 번째 호출이 예외를 내거나 캡처한 출력을 잃으면 안 된다.
+    """
+    log_path = tmp_path / "child.log"
+    with open(log_path, "wb") as log_file:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "print('hello')"],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
+    proc.wait(timeout=5)
+
+    first = _terminate_and_reap(proc, log_path)
+    second = _terminate_and_reap(proc, log_path)
+
+    assert "hello" in first
+    assert second == first
 
 
 async def test_whoami_reflects_the_calling_session():
