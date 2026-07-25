@@ -14,7 +14,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="mcp-test-server",
         description="여러 Claude Code 세션이 공유하는 MCP 테스트 서버",
     )
-    parser.add_argument("--host", default=DEFAULTS["host"], help="MCP 리스너 바인딩 주소")
+    parser.add_argument(
+        "--host",
+        default=DEFAULTS["host"],
+        help=(
+            "MCP 리스너 바인딩 주소. 루프백 밖(예: 0.0.0.0)에 열면 인증이 "
+            "비어 있지 않은 토큰을 전부 통과시키므로, 그 포트에 닿는 사람은 "
+            "누구나 모든 세션의 프로젝트 경로와 토큰을 읽을 수 있다"
+        ),
+    )
     parser.add_argument("--port", type=int, default=DEFAULTS["port"], help="MCP 리스너 포트")
     parser.add_argument(
         "--admin-port",

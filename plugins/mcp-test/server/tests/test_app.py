@@ -10,8 +10,10 @@ from mcp_test_server.app import (
     ADMIN_HOST,
     DEFAULTS,
     PortInUse,
+    build_servers,
     build_stack,
     ensure_port_free,
+    exposure_warning,
 )
 from mcp_test_server.registry import Registry
 
@@ -71,6 +73,60 @@ def test_ensure_port_free_raises_for_a_bound_port():
         with pytest.raises(PortInUse) as excinfo:
             ensure_port_free("127.0.0.1", port)
     assert str(port) in str(excinfo.value)
+
+
+def test_admin_listener_stays_on_loopback_even_when_mcp_is_exposed():
+    """관리 리스너가 --host 를 따라가지 않는지 실제 설정값으로 확인한다.
+
+    ADMIN_HOST 상수만 보는 테스트는 build_servers 안에서 host=ADMIN_HOST 가
+    host=host 로 바뀌어도 그대로 통과한다. 인증 없는 관리 API를 정당화하는
+    것은 상수가 아니라 실제 바인딩 주소이므로, 바인딩 없이 만든 uvicorn
+    설정에서 두 리스너의 host 를 직접 본다.
+    """
+    mcp_app, admin_app, _ = build_stack(
+        host="0.0.0.0",
+        port=8765,
+        admin_port=8766,
+        stale_after=300.0,
+        clock=lambda: T0,
+    )
+    mcp_server, admin_server = build_servers(
+        mcp_app, admin_app, host="0.0.0.0", port=8765, admin_port=8766
+    )
+
+    assert mcp_server.config.host == "0.0.0.0"
+    assert mcp_server.config.port == 8765
+    assert admin_server.config.host == "127.0.0.1"
+    assert admin_server.config.port == 8766
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.0.0.2", "localhost", "::1"])
+def test_no_exposure_warning_for_loopback_addresses(host):
+    assert exposure_warning(host) is None
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.5"])
+def test_exposure_warning_names_the_host_and_the_weak_auth(host):
+    warning = exposure_warning(host)
+    assert warning is not None
+    assert host in warning
+    assert "토큰" in warning
+
+
+async def test_mcp_endpoint_is_dereferenceable_for_a_wildcard_bind():
+    """0.0.0.0 은 접속 대상 주소가 아니므로 그대로 안내하면 안 된다."""
+    _, admin_app, _ = build_stack(
+        host="0.0.0.0",
+        port=9000,
+        admin_port=9001,
+        stale_after=300.0,
+        clock=lambda: T0,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=admin_app), base_url="http://admin"
+    ) as client:
+        body = (await client.get("/api/status")).json()
+    assert body["mcp_endpoint"] == "http://127.0.0.1:9000/mcp"
 
 
 def test_build_stack_shares_one_registry():

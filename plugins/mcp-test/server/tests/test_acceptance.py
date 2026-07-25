@@ -81,6 +81,11 @@ async def running_server():
     )
     task = asyncio.create_task(server.serve())
     while not server.started:
+        # 바인딩에 실패하면 uvicorn은 태스크 안에서 sys.exit(1)을 부른다.
+        # started는 영영 True가 되지 않으므로, 죽었는지 보지 않으면 이 루프가
+        # 30초 타임아웃까지 돌면서 진짜 OSError를 가려 버린다.
+        if task.done():
+            task.result()
         await asyncio.sleep(0.02)
     try:
         yield f"http://127.0.0.1:{port}/mcp", registry
