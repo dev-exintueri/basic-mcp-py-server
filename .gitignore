@@ -17,3 +17,7 @@ venv/
 
 # OS
 .DS_Store
+
+# 격리 작업 공간과 실행 기록 (도구가 만드는 스크래치)
+.worktrees/
+.superpowers/
