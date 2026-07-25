@@ -27,7 +27,9 @@ def test_publish_without_a_loop_does_not_raise() -> None:
 def test_file_handler_still_writes_when_the_broadcaster_has_no_loop(
     tmp_path: Path,
 ) -> None:
-    """기동 로그와 크래시 로그가 여기 걸린다. 해피 패스 SSE 테스트로는 못 잡는다."""
+    """BroadcastHandler의 emit이 루프 없이도 예외를 발생시키지 않고 처리해
+    로깅 체인을 중단하지 않는다. 기동 로그와 크래시 로그는 loop 없이 나가기
+    때문에 이들이 파일에 기록되는 것이 중요하다."""
     log_path = tmp_path / "out.log"
     file_handler = logging.FileHandler(log_path, encoding="utf-8")
     file_handler.setFormatter(logging.Formatter("%(message)s"))
@@ -115,3 +117,19 @@ async def test_handler_publishes_formatted_strings_not_records() -> None:
     received = await asyncio.wait_for(queue.get(), timeout=1.0)
     assert received == "PREFIX 값 42"
     assert isinstance(received, str)
+
+
+async def test_multiple_subscribers_each_receive_published_line() -> None:
+    """여러 구독자가 각각 같은 줄을 받는다. fan-out 이 동작함을 증명한다."""
+    broadcaster = LogBroadcaster()
+    broadcaster.bind_loop(asyncio.get_running_loop())
+    queue1 = broadcaster.subscribe()
+    queue2 = broadcaster.subscribe()
+    queue3 = broadcaster.subscribe()
+
+    broadcaster.publish("공중파")
+    await asyncio.sleep(0)
+
+    assert await asyncio.wait_for(queue1.get(), timeout=1.0) == "공중파"
+    assert await asyncio.wait_for(queue2.get(), timeout=1.0) == "공중파"
+    assert await asyncio.wait_for(queue3.get(), timeout=1.0) == "공중파"
