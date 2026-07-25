@@ -86,4 +86,10 @@ python3 docs/claude-base/sync.py mcp        # 특정 slug만
 
 ### 갱신 시점
 
-정해진 주기는 없다. MCP 서버 구현 중 문서와 실제 동작이 어긋날 때, Claude Code 메이저 업데이트 후, `https://code.claude.com/docs/en/whats-new`에 MCP 관련 항목이 올라왔을 때 돌린다.
+기준은 `last-sync.txt`의 `last run:`이다. **이 디렉토리를 참조하려는 시점에 마지막 대조일이 3일 이상 지났으면 읽기 전에 전체를 돌린다.** 정책의 출처는 저장소 루트 [CLAUDE.md](../../CLAUDE.md)이며, 여기서는 그 실행 방법만 적는다.
+
+그 밖에 주기와 무관하게 돌려야 하는 경우가 있다.
+
+- MCP 서버 구현 중 문서와 실제 동작이 어긋날 때
+- Claude Code 메이저 업데이트 후
+- `https://code.claude.com/docs/en/whats-new`에 MCP 관련 항목이 올라왔을 때
