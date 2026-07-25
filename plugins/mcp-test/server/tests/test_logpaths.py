@@ -218,9 +218,17 @@ def test_tail_returns_last_n_lines(tmp_path: Path) -> None:
 
 def test_tail_drops_the_partial_first_line_when_truncated(tmp_path: Path) -> None:
     path = tmp_path / "b.log"
-    path.write_text("A" * 100 + "\n" + "B" * 100, encoding="utf-8")
+    path.write_text("A" * 100 + "\n" + "B" * 20 + "\n", encoding="utf-8")
     result = tail_lines(path, lines=10, max_bytes=50)
-    assert result == ["B" * 100]      # 잘린 A 줄은 버린다
+    assert result == ["B" * 20]      # 잘린 A 줄은 버린다
+
+
+def test_tail_returns_nothing_when_the_last_line_exceeds_max_bytes(tmp_path: Path) -> None:
+    """읽어 온 것이 전부 반쪽 줄이면 남길 온전한 줄이 없다.
+    실제 로그 줄은 짧고 max_bytes 는 64KB 이므로 실무에서 걸리지 않는다."""
+    path = tmp_path / "c.log"
+    path.write_text("B" * 100, encoding="utf-8")
+    assert tail_lines(path, lines=10, max_bytes=50) == []
 
 
 def test_tail_on_missing_file_returns_empty(tmp_path: Path) -> None:
