@@ -51,6 +51,12 @@ from .registry import Registry, session_view
 
 registry_logger = logging.getLogger("mcp_test_server.registry")
 
+# 브라우저가 유휴 연결을 끊지 않게 하는 주석 하트비트의 간격(초).
+_HEARTBEAT_SECONDS = 15.0
+# 로그 스트림이 종료 시작 여부를 다시 확인하는 주기(초). 하트비트 간격과
+# 별개다 — 이 값은 "종료를 얼마나 늦게 알아채도 되는가"만 정한다.
+_STOP_POLL_SECONDS = 1.0
+
 _PAGE = """<!doctype html>
 <html lang="ko">
 <head>
@@ -124,6 +130,7 @@ def build_admin_app(
     mcp_endpoint: str,
     broadcaster: LogBroadcaster | None = None,
     log_file: Callable[[], Path | None] = lambda: None,
+    should_stop: Callable[[], bool] = lambda: False,
 ) -> Starlette:
     def _snapshot() -> tuple[datetime, list[dict[str, object]]]:
         now = clock()
@@ -195,14 +202,34 @@ def build_admin_app(
         queue = broadcaster.subscribe()
 
         async def events():
+            # 큐를 짧은 주기로 깨워서 기다리는 이유는 하트비트가 아니라 종료다.
+            # 15초를 통째로 기다리면 그 사이에 시작된 종료를 최대 15초 동안
+            # 못 본다. 유휴 시간을 따로 세서, 하트비트 간격은 예전 그대로
+            # _HEARTBEAT_SECONDS 를 유지한다.
+            idle = 0.0
             try:
                 while True:
+                    if should_stop():
+                        # 여기서 그냥 돌아간다. 이것이 이 파일에서 가장 중요한
+                        # 한 줄이다 — 종료가 시작됐을 때 이 제너레이터가 스스로
+                        # 끝나지 않으면 uvicorn 이 유예 시간을 다 기다린 뒤
+                        # 태스크를 강제 취소하고, 그 CancelledError 가
+                        # "Exception in ASGI application" 트레이스백이 되어
+                        # 정상 종료마다 로그에 ERROR 를 남긴다. 취소를 삼켜서
+                        # 가리는 것이 아니라 취소할 일 자체를 없앤다.
+                        return
                     try:
-                        line = await asyncio.wait_for(queue.get(), timeout=15.0)
+                        line = await asyncio.wait_for(
+                            queue.get(), timeout=_STOP_POLL_SECONDS
+                        )
                     except asyncio.TimeoutError:
-                        # 유휴 연결이 끊기지 않게 하는 주석 하트비트다.
-                        yield b": ping\n\n"
+                        idle += _STOP_POLL_SECONDS
+                        if idle >= _HEARTBEAT_SECONDS:
+                            # 유휴 연결이 끊기지 않게 하는 주석 하트비트다.
+                            idle = 0.0
+                            yield b": ping\n\n"
                         continue
+                    idle = 0.0
                     # 트레이스백은 여러 줄이다. 줄마다 data: 를 붙이지 않으면
                     # SSE 프레이밍이 깨진다.
                     payload = "".join(f"data: {part}\n" for part in line.split("\n"))

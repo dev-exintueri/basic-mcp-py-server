@@ -111,6 +111,7 @@ def build_stack(
     clock: Callable[[], datetime] = _utcnow,
     broadcaster: LogBroadcaster | None = None,
     log_file: Callable[[], Path | None] = lambda: None,
+    should_stop: Callable[[], bool] = lambda: False,
 ) -> tuple[ASGIApp, ASGIApp, Registry]:
     """MCP 앱, 관리 앱, 그리고 둘이 공유하는 레지스트리를 만든다.
 
@@ -137,6 +138,7 @@ def build_stack(
             mcp_endpoint=f"http://{endpoint_host(host)}:{port}/mcp",
             broadcaster=broadcaster,
             log_file=log_file,
+            should_stop=should_stop,
         )
     )
     return mcp_app, admin_app, registry
@@ -261,6 +263,19 @@ async def serve(
         broadcaster.bind_loop(loop)
     loop.set_exception_handler(_loop_exception_handler)
 
+    # 닭과 달걀이다. 관리 앱은 build_stack() 에서 만들어지는데 그 앱이 봐야 할
+    # uvicorn.Server 는 build_servers() 가 그다음에야 만든다. 그래서 빈 리스트를
+    # 먼저 클로저에 넘기고 서버가 생긴 뒤에 채운다. 서버가 아직 없으면 종료도
+    # 시작되지 않았으므로 any() 는 자연스럽게 False 다.
+    #
+    # 관리 쪽만 보지 않는다. Ctrl-C 는 두 리스너에 함께 가고 MCP 쪽이 먼저
+    # 종료를 시작할 수 있는데, 그때 로그 스트림이 계속 열려 있으면 관리
+    # 리스너가 유예 시간을 다 쓰고 결국 강제 취소로 끝난다.
+    servers: list[uvicorn.Server] = []
+
+    def shutting_down() -> bool:
+        return any(server.should_exit for server in servers)
+
     mcp_app, admin_app, registry = build_stack(
         host=host,
         port=port,
@@ -268,10 +283,12 @@ async def serve(
         stale_after=stale_after,
         broadcaster=broadcaster,
         log_file=log_file,
+        should_stop=shutting_down,
     )
     mcp_server, admin_server = build_servers(
         mcp_app, admin_app, host=host, port=port, admin_port=admin_port
     )
+    servers.extend((mcp_server, admin_server))
     # 반드시 build_servers() **뒤**여야 한다. uvicorn.Config 생성자는 log_config
     # 와 무관하게 자기 log_level 로 uvicorn.error 의 레벨을 덮어쓰므로, 이 줄을
     # logsetup 이나 이 호출 앞에 두면 나중에 만들어지는 관리 쪽 Config

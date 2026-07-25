@@ -406,8 +406,12 @@ async def test_ctrl_c_exits_even_with_an_open_log_stream(tmp_path) -> None:
                 with contextlib.suppress(Exception):
                     await stream.__aexit__(None, None, None)
 
-            # 유예 시간(3초)에 정리 시간을 더한 값. 무한 대기와는 자릿수가 다르다.
-            assert elapsed < 15.0, f"종료에 {elapsed:.1f}초 걸렸다"
+            # 2초는 유예 시간(3초)보다 **짧게** 잡은 값이다. 로그 스트림이
+            # 종료를 알아채고 스스로 끝나므로 uvicorn 이 기다릴 것이 남지
+            # 않아, 실측은 SSE 를 열지 않았을 때(0.50초)와 사실상 같은
+            # 0.39~0.45초다. should_stop 배선이 사라지면 다시 유예 시간을
+            # 다 쓰고 3.4초가 되므로 이 상한이 그것도 함께 잡는다.
+            assert elapsed < 2.0, f"종료에 {elapsed:.1f}초 걸렸다"
         finally:
             _terminate_and_reap(proc, out_path)
     finally:

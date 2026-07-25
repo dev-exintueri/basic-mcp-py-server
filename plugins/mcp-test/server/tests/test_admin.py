@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timezone
 
 import httpx
+import pytest
 from starlette.responses import JSONResponse
 
 from mcp_test_server.admin import build_admin_app
@@ -380,6 +381,92 @@ async def test_stream_unsubscribes_when_the_client_disconnects() -> None:
 
     await session.aclose()
     assert broadcaster.subscriber_count == 0
+
+
+async def test_stream_returns_by_itself_once_shutdown_begins() -> None:
+    """종료가 시작되면 스트림이 스스로 끝나야 한다.
+
+    이게 없으면 uvicorn 은 이 SSE 연결이 닫히기를 유예 시간(3초)만큼 기다린
+    뒤 태스크를 강제로 취소하고, 그 CancelledError 가 "Exception in ASGI
+    application" 트레이스백이 되어 **정상 종료마다** 로그에 ERROR 두 줄을
+    남긴다. 취소를 삼켜서 가리는 것이 아니라 취소할 일 자체를 없애는 것이
+    이 테스트가 지키는 성질이다.
+
+    _STOP_POLL_SECONDS 를 건드리지 않고 실제 값(1초)으로 돌린다. 종료를
+    알아채는 데 실제로 얼마나 걸리는지가 이 수정의 요점이기 때문이다.
+    """
+    from mcp_test_server.admin import build_admin_app
+    from mcp_test_server.logstream import LogBroadcaster
+
+    broadcaster = LogBroadcaster()
+    broadcaster.bind_loop(asyncio.get_running_loop())
+    stopping = False
+
+    app = build_admin_app(
+        make_registry(),
+        started_at=T0,
+        clock=lambda: T0,
+        mcp_endpoint="http://127.0.0.1:8765/mcp",
+        broadcaster=broadcaster,
+        should_stop=lambda: stopping,
+    )
+
+    session = _StreamSession(app)
+    await session.start()
+    assert broadcaster.subscriber_count == 1
+
+    stopping = True
+    # 연결을 끊지 않는다. 끊고 나서 끝나는 것은 원래 되던 일이고, 여기서
+    # 확인할 것은 클라이언트가 그대로 붙어 있어도 서버가 먼저 끝낸다는 것이다.
+    await asyncio.wait_for(session.task, timeout=10.0)
+
+    assert broadcaster.subscriber_count == 0
+
+
+async def test_heartbeat_interval_survives_the_shutdown_polling(monkeypatch) -> None:
+    """종료 감지를 짧은 주기로 돌리되 하트비트 간격은 그대로여야 한다.
+
+    순진하게 고치면 wait_for 의 timeout 을 1초로 줄이면서 하트비트도 1초마다
+    나가게 된다 — 브라우저로 가는 트래픽이 15배가 된다. 유휴 시간을 따로
+    세는 이유가 그것이다.
+
+    실제 상수는 15초라 그대로 기다릴 수 없으므로 비율만 유지한 채 줄인다.
+    폴링 5회당 하트비트 1회이므로, 첫 폴링 만료에 하트비트가 나오면 안 된다.
+    """
+    from mcp_test_server import admin as admin_module
+    from mcp_test_server.admin import build_admin_app
+    from mcp_test_server.logstream import LogBroadcaster
+
+    # 실제 값이 바뀌면 이 테스트의 전제도 깨진다. 함께 못박아 둔다.
+    assert admin_module._HEARTBEAT_SECONDS == 15.0
+    assert admin_module._STOP_POLL_SECONDS == 1.0
+
+    monkeypatch.setattr(admin_module, "_STOP_POLL_SECONDS", 0.02)
+    monkeypatch.setattr(admin_module, "_HEARTBEAT_SECONDS", 0.10)
+
+    broadcaster = LogBroadcaster()
+    broadcaster.bind_loop(asyncio.get_running_loop())
+    app = build_admin_app(
+        make_registry(),
+        started_at=T0,
+        clock=lambda: T0,
+        mcp_endpoint="http://127.0.0.1:8765/mcp",
+        broadcaster=broadcaster,
+    )
+
+    session = _StreamSession(app)
+    try:
+        await session.start()
+
+        # 폴링 한 번(0.02초)이 만료돼도 하트비트는 아직이다. 넉넉히 세 배를
+        # 기다려도 조용해야 한다 — 폴링마다 ping 을 뱉으면 여기서 잡힌다.
+        with pytest.raises(asyncio.TimeoutError):
+            await session.body(timeout=0.06)
+
+        # 유휴가 쌓이면 결국 나온다.
+        assert (await session.body(timeout=5.0)) == b": ping\n\n"
+    finally:
+        await session.aclose()
 
 
 async def test_gate_blocks_the_log_stream_and_leaks_no_body() -> None:
