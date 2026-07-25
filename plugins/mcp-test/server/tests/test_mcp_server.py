@@ -58,7 +58,8 @@ async def test_tool_call_is_logged_with_name_and_instance(caplog) -> None:
     assert "ok" in lines[0]
 
 
-async def test_tool_failure_is_logged_as_error(caplog) -> None:
+async def test_tool_call_success_is_logged_as_info(caplog) -> None:
+    """성공한 도구 호출이 INFO로 기록된다."""
     import logging
 
     from mcp_test_server.registry import Registry
@@ -67,13 +68,48 @@ async def test_tool_failure_is_logged_as_error(caplog) -> None:
     registry = Registry(stale_after=300.0)
     mcp = build_mcp(registry, started_at=T0, clock=lambda: T0)
 
-    # Call with valid arguments so the function is called, then check the log was created
     result = await mcp.call_tool("echo", {"text": "test"})
     assert "test" in str(result)
 
-    # Check that the call was logged as INFO (success)
     records = [r for r in caplog.records if r.name == "mcp_test_server.call"]
-    assert records and "ok" in records[0].getMessage()
+    assert records and records[0].levelno == logging.INFO
+    assert "ok" in records[0].getMessage()
+
+
+def test_tool_failure_is_logged_as_warning(caplog) -> None:
+    """데코레이터의 except 분기를 직접 테스트한다.
+
+    brief의 원본은 FastMCP 인자 검증 오류를 로깅하려 했는데, 이는 불가능하다:
+    검증 실패 시 데코레이터 래퍼가 호출되기 전에 FastMCP가 예외를 발생시킨다.
+    대신 데코레이터 자체를 단위 테스트한다.
+    """
+    import logging
+
+    import pytest
+
+    from mcp_test_server.mcp_server import _logged
+
+    caplog.set_level(logging.INFO, logger="mcp_test_server.call")
+
+    # 의도적으로 실패하는 함수
+    def failing_tool():
+        raise ValueError("test error")
+
+    # 데코레이터 적용
+    decorated = _logged(failing_tool)
+
+    # 예외가 전파되는지 확인
+    with pytest.raises(ValueError):
+        decorated()
+
+    # 정확히 하나의 WARNING 레코드가 생성되었는지 확인
+    records = [r for r in caplog.records if r.name == "mcp_test_server.call"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    msg = records[0].getMessage()
+    assert "error=ValueError" in msg
+    assert "dur_ms=" in msg
+    assert "tool=failing_tool" in msg
 
 
 async def test_tool_schemas_are_unchanged_by_the_logging_decorator() -> None:
