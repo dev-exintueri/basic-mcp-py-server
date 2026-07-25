@@ -9,7 +9,8 @@
 set -u
 
 url="${CLAUDE_PLUGIN_OPTION_SERVER_URL:-http://127.0.0.1:8765}"
-code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 -X POST "$url/mcp" 2>/dev/null || echo "000")
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 -X POST "$url/mcp" 2>/dev/null || true)
+code=${code:-000}
 
 case "$code" in
   401)

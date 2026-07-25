@@ -40,9 +40,13 @@ def test_mcp_config_uses_http_with_all_three_substitutions():
 
 
 def test_headers_helper_does_not_reference_user_config():
-    # 셸을 거치는 필드는 ${user_config.*}를 거부한다
+    # 셸을 거치는 필드는 ${user_config.*} 치환을 거부한다.
+    # 산문 언급(주석에서 문법을 설명하는 것)이 아니라, 실행되는 코드에
+    # 실제 치환 참조가 있는지를 본다. 주석까지 걸러내면 이 파일의 경고
+    # 주석("${user_config.*}를 여기에 쓰면 안 된다")과 충돌하지 않는다.
     helper = (PLUGIN_ROOT / "scripts/connection-id.sh").read_text(encoding="utf-8")
-    assert "user_config" not in helper
+    code_lines = [line for line in helper.splitlines() if not line.strip().startswith("#")]
+    assert "${user_config." not in "\n".join(code_lines)
 
 
 def test_shell_scripts_are_executable():
@@ -79,6 +83,22 @@ def test_check_server_script_never_blocks_the_session():
         env=env,
     )
     assert result.returncode == 0
+
+
+def test_check_server_script_names_the_start_command_when_the_server_is_down():
+    # 서버가 아예 안 떠 있는 경우가 가장 흔한 실패다. 그 경우 사용자가 실제로
+    # 할 수 있는 조치(/mcp-test:server-start)를 안내해야 한다. exit code만
+    # 보면 curl이 "000"을 두 번 이어붙여 이 분기를 영영 못 타는 회귀를
+    # 잡지 못한다.
+    env = {**os.environ, "CLAUDE_PLUGIN_OPTION_SERVER_URL": "http://127.0.0.1:1"}
+    result = subprocess.run(
+        [str(PLUGIN_ROOT / "hooks/check-server.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0
+    assert "/mcp-test:server-start" in result.stdout
 
 
 def test_commands_exist():
