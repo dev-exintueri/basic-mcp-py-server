@@ -1,0 +1,15 @@
+{
+  "name": "basic-mcp-py-server",
+  "owner": { "name": "exintueri" },
+  "description": "MCP 테스트 서버 플러그인",
+  "plugins": [
+    {
+      "name": "mcp-test",
+      "source": "./plugins/mcp-test",
+      "description": "여러 Claude 세션이 하나의 파이썬 프로세스에 붙는 MCP 테스트 서버",
+      "version": "0.1.0",
+      "author": { "name": "exintueri" },
+      "keywords": ["mcp", "test", "http"]
+    }
+  ]
+}
