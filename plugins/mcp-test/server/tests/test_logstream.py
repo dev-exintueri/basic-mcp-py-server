@@ -27,13 +27,29 @@ def test_publish_without_a_loop_does_not_raise() -> None:
 def test_file_handler_still_writes_when_the_broadcaster_has_no_loop(
     tmp_path: Path,
 ) -> None:
-    """BroadcastHandler의 emit이 루프 없이도 예외를 발생시키지 않고 처리해
-    로깅 체인을 중단하지 않는다. 기동 로그와 크래시 로그는 loop 없이 나가기
-    때문에 이들이 파일에 기록되는 것이 중요하다."""
+    """루프 없이 emit 해도 BroadcastHandler 가 실패하지 않고 파일에도 남는다.
+
+    파일에 남았다는 사실만으로는 아무것도 증명되지 않는다. 파일 핸들러가
+    handlers 의 앞에 있어 BroadcastHandler 가 돌기 **전에** 이미 썼기
+    때문이다. 순서를 뒤집는 것도 소용없다 — BroadcastHandler.emit 은
+    publish() 를 try/except Exception 으로 감싸고 handleError() 로 삼키므로,
+    logstream 의 루프 가드를 지워도 예외는 로깅 체인 밖으로 나오지 않는다.
+
+    그래서 그 handleError 자체를 본다. 가드가 사라지면 publish 안에서
+    None.is_closed() 가 AttributeError 를 내고 emit 이 그것을 잡아
+    handleError 를 부르므로, "한 번도 불리지 않았다"가 가드에 실제로 걸린
+    유일한 관찰점이다.
+    """
+    calls: list[logging.LogRecord] = []
+
+    class _WatchingHandler(BroadcastHandler):
+        def handleError(self, record: logging.LogRecord) -> None:
+            calls.append(record)
+
     log_path = tmp_path / "out.log"
     file_handler = logging.FileHandler(log_path, encoding="utf-8")
     file_handler.setFormatter(logging.Formatter("%(message)s"))
-    stream_handler = BroadcastHandler(LogBroadcaster())    # bind_loop 를 부르지 않았다
+    stream_handler = _WatchingHandler(LogBroadcaster())     # bind_loop 를 부르지 않았다
 
     logger = logging.getLogger("test_no_loop")
     logger.handlers = [file_handler, stream_handler]
@@ -43,6 +59,7 @@ def test_file_handler_still_writes_when_the_broadcaster_has_no_loop(
     logger.info("루프 없이도 남아야 한다")
     file_handler.close()
 
+    assert calls == []
     assert "루프 없이도 남아야 한다" in log_path.read_text(encoding="utf-8")
 
 
