@@ -233,3 +233,25 @@ def test_tail_returns_nothing_when_the_last_line_exceeds_max_bytes(tmp_path: Pat
 
 def test_tail_on_missing_file_returns_empty(tmp_path: Path) -> None:
     assert tail_lines(tmp_path / "absent.log") == []
+
+
+def test_tail_seeks_to_correct_byte_offset(tmp_path: Path) -> None:
+    """seek 윈도우 계산이 정확한지 검증한다.
+
+    고정폭 번호 줄로 오프셋을 손으로 계산 가능하게 만든다.
+    파일: "0000\n0001\n...0049\n" = 50줄 × 5바이트 = 250바이트
+    max_bytes: 60
+    offset: 250 - 60 = 190 (줄38 중간)
+    읽은 데이터: 줄38 일부 + "\n" + 줄39-49 (60바이트)
+    partition("\n"): 첫 개행 앞을 버림 = 줄39-49만 남음
+    따라서 11줄(줄39-49) 반환.
+    오프셋이 12바이트 어긋나면 (190→202) 줄40부터 시작하므로 달라진다.
+    """
+    path = tmp_path / "d.log"
+    lines = [f"{i:04d}\n" for i in range(50)]
+    path.write_text("".join(lines), encoding="utf-8")
+    # 파일 크기: 250바이트, max_bytes: 60
+    # offset 250-60=190은 줄38 중간, partition 후 줄39-49만 남음
+    result = tail_lines(path, lines=20, max_bytes=60)
+    expected = [f"{i:04d}" for i in range(39, 50)]
+    assert result == expected
