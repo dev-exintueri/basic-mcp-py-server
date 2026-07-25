@@ -39,6 +39,9 @@ DEFAULTS = {
 
 _PURGE_INTERVAL_SECONDS = 600.0
 
+# 종료 신호를 받고 열린 연결이 닫히기를 기다리는 한도(초). build_servers 참조.
+_GRACEFUL_SHUTDOWN_SECONDS = 3
+
 # "모든 인터페이스"를 뜻하는 주소들. 접속 대상 주소가 아니다.
 _WILDCARD_HOSTS = frozenset({"0.0.0.0", "::"})
 
@@ -154,14 +157,19 @@ def build_servers(
     떼어 내 그 성질을 검증 가능하게 만든다.
 
     log_config=None 은 uvicorn 이 자기 핸들러를 설치하지 못하게 한다. uvicorn.error
-    로거는 handlers=0, propagate=True 를 유지하므로 여전히 루트로 전파되지만,
-    Config 생성자가 그때마다 이 로거의 레벨을 자기 log_level 로 다시 맞춘다 —
-    나중에 만든 관리 쪽(warning)이 이겨 실제로는 WARNING 이상만 파일에 남는다.
-    uvicorn 의 INFO 출력(기동 안내와 종료 진행 메시지)은 걸러지고, 크래시로 뜨는
-    ERROR 는 그대로 남는다. serve() 의 "서버 종료" 로그는 사후 요약이므로, 종료가
-    열린 커넥션에 막혔을 때 uvicorn 의 세부 진단 메시지를 대신하지 않는다.
+    로거는 handlers=0, propagate=True 를 유지하므로 루트로 전파되어 우리 파일에
+    잡힌다. 다만 Config 생성자가 그때마다 이 로거의 레벨을 자기 log_level 로 다시
+    맞추고, 나중에 만든 관리 쪽(warning)이 이긴다 — 그래서 serve() 가 이 함수를
+    부른 **직후에** uvicorn.error 의 레벨을 INFO 로 되돌린다. 그쪽에 설명이 있다.
     access_log=False 인 이유는 AccessLogMiddleware 가 양쪽 앱에 대해 같은 형식으로
     남기기 때문이다.
+
+    timeout_graceful_shutdown 은 양쪽 모두에 준다. 이 서버는 장수 연결을 다룬다 —
+    관리 앱의 /api/logs/stream 은 SSE 라 브라우저 탭이 열려 있는 한 끝나지 않고,
+    MCP 쪽 streamable-http 도 알림용 GET 스트림을 붙들고 있다. 이 값이 없으면
+    uvicorn 은 그 연결들이 스스로 닫히기를 무한정 기다리므로, 관리 화면을 열어 둔
+    채 Ctrl-C 를 누르면 프로세스가 영영 끝나지 않는다. 3초는 진행 중인 짧은 요청이
+    응답을 마치기에는 넉넉하고, 사람이 종료를 기다리기에는 짧은 값이다.
     """
     mcp_server = uvicorn.Server(
         uvicorn.Config(
@@ -171,6 +179,7 @@ def build_servers(
             log_level="info",
             log_config=None,
             access_log=False,
+            timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN_SECONDS,
         )
     )
     admin_server = uvicorn.Server(
@@ -181,6 +190,7 @@ def build_servers(
             log_level="warning",
             log_config=None,
             access_log=False,
+            timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN_SECONDS,
         )
     )
     return mcp_server, admin_server
@@ -195,11 +205,13 @@ async def _purge_loop(
     while True:
         await asyncio.sleep(_PURGE_INTERVAL_SECONDS)
         now = clock()
-        registry.purge(now)
+        purged = registry.purge(now)
+        if purged:
+            registry_logger.info("오래된 세션 %d개를 정리했다", purged)
         if log_dir is not None:
             removed, warnings = purge_logs(log_dir, now, keep=log_file())
             if removed:
-                registry_logger.info("오래된 로그 %d개를 지웠다", removed)
+                logger.info("오래된 로그 %d개를 지웠다", removed)
             for warning in warnings:
                 logger.warning("%s", warning)
 
@@ -260,6 +272,13 @@ async def serve(
     mcp_server, admin_server = build_servers(
         mcp_app, admin_app, host=host, port=port, admin_port=admin_port
     )
+    # 반드시 build_servers() **뒤**여야 한다. uvicorn.Config 생성자는 log_config
+    # 와 무관하게 자기 log_level 로 uvicorn.error 의 레벨을 덮어쓰므로, 이 줄을
+    # logsetup 이나 이 호출 앞에 두면 나중에 만들어지는 관리 쪽 Config
+    # (log_level="warning") 가 그대로 지워 버린다. 이 레벨을 INFO 로 되돌려야
+    # uvicorn 의 기동 안내와 "Waiting for connections to close..." 가 로그
+    # 파일에 남는다 — 종료가 열린 연결에 막혔을 때 그것이 유일한 단서다.
+    logging.getLogger("uvicorn.error").setLevel(logging.INFO)
 
     print(f"MCP    http://{host}:{port}/mcp")
     print(f"관리   http://{ADMIN_HOST}:{admin_port}/")

@@ -51,8 +51,10 @@ Traceback (most recent call last):
 |---|---|
 | `mcp_test_server.http` | 메서드, 경로, 상태, 소요 ms, instance, subject(마스킹), 거부 사유 |
 | `mcp_test_server.call` | 도구 이름, instance, 소요 ms, 성공/예외 |
-| `mcp_test_server.registry` | 연결, 차단/해제, stale 전이, purge 결과 |
+| `mcp_test_server.registry` | 연결, 차단/해제, purge 결과 |
 | `mcp_test_server.app` | 기동, 종료, 크래시 트레이스백 |
+
+registry 행에 있던 "stale 전이"는 뺐다. `is_stale()`은 `now`와 `last_seen`으로 그때그때 계산하는 파생값이라 "전이"라고 부를 사건 자체가 없다. 남기려면 `Registry`가 이전 상태를 들고 비교해야 하는데, 그 상태를 더하는 것은 로그 한 줄이 주는 값에 비해 과하다.
 
 ### 2.2 uvicorn 흡수
 
@@ -62,7 +64,11 @@ Traceback (most recent call last):
 - `access_log=False` — 접근 로그는 §5의 `AccessLogMiddleware`가 양쪽 앱에 대해 일관된 형식으로 남긴다. uvicorn의 것과 이중으로 남기지 않는다.
 - `log_level`은 지금 값을 유지한다 (MCP `info`, 관리 `warning`).
 
-`log_config=None`이면 uvicorn이 레벨도 설정하지 않으므로, `logsetup`이 `logging.getLogger("uvicorn").setLevel()`을 직접 건다.
+- `timeout_graceful_shutdown` — 양쪽 모두에 준다. 관리 앱의 SSE(§6.5)와 MCP의 streamable-http 알림 스트림은 스스로 끝나지 않으므로, 이 값이 없으면 관리 화면을 열어 둔 채 Ctrl-C를 눌렀을 때 프로세스가 영영 종료되지 않는다.
+
+`log_config=None`이어도 uvicorn은 레벨을 설정한다. `uvicorn.Config.__init__`이 자기 `configure_logging()`을 불러 `uvicorn.error`/`uvicorn.access`/`uvicorn.asgi`의 레벨을 자기 `log_level`로 직접 박기 때문이다. 그래서 부모인 `uvicorn` 로거에 `setLevel()`을 걸어도 소용이 없고(자식 레벨이 명시돼 있다), 관리 쪽 `Config(log_level="warning")`가 MCP 쪽보다 나중에 만들어지므로 `uvicorn.error`는 WARNING에 고정된다 — 기동 안내도 `Waiting for connections to close...`도 파일에 남지 않는다.
+
+**그래서 `logsetup`이 아니라 `serve()`가, `build_servers()` 호출 *직후에* `logging.getLogger("uvicorn.error").setLevel(logging.INFO)`을 건다.** `Config` 생성자가 레벨을 덮어쓰므로 그보다 뒤여야만 효과가 있다. 대가는 두 가지이고 그대로 받아들인다: 범주 칸이 `uvicorn.error`의 마지막 마디인 `error`로 찍히고(INFO 줄에도), uvicorn의 기동 안내가 `serve()`가 남기는 기동 줄과 거의 겹친다.
 
 ---
 

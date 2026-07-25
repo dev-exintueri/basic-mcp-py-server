@@ -321,6 +321,96 @@ async def test_purge_loop_cleans_log_files(tmp_path, monkeypatch) -> None:
     assert not old.exists()
 
 
+async def test_purge_loop_logs_both_counts_through_their_own_loggers(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """청소 결과 두 줄이 각각 제 로거로 나가는지 본다 (스펙 §2.1).
+
+    개수만 확인하면 로거를 잘못 골라도 통과한다. 포매터의 범주 칸은 로거
+    이름의 마지막 마디를 찍으므로, 로그 파일 청소를 registry 로거로 내보내면
+    세션과 무관한 줄에 `registry` 가 붙는다. 그래서 메시지가 아니라
+    record.name 을 본다.
+    """
+    import os
+
+    old = tmp_path / "mcp-test-server.8765.2026-07-20.log"
+    old.write_text("x", encoding="utf-8")
+    stamp = (T0 - timedelta(hours=200)).timestamp()
+    os.utime(old, (stamp, stamp))
+
+    registry = Registry(stale_after=300.0, purge_after=60.0)
+    registry.touch(
+        instance_id="i1", subject="alice", project="p", label="l",
+        mcp_session_id=None, now=T0 - timedelta(seconds=120),
+    )
+
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(app_module, "_PURGE_INTERVAL_SECONDS", 0.0)
+    task = asyncio.create_task(
+        app_module._purge_loop(registry, lambda: T0, tmp_path, lambda: None)
+    )
+    try:
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if not old.exists() and not registry.all():
+                break
+    finally:
+        task.cancel()
+
+    sessions = [r for r in caplog.records if "세션" in r.getMessage()]
+    files = [r for r in caplog.records if "로그" in r.getMessage()]
+    assert len(sessions) >= 1
+    assert len(files) >= 1
+    assert sessions[0].name == "mcp_test_server.registry"
+    assert "1개" in sessions[0].getMessage()
+    assert files[0].name == "mcp_test_server.app"
+
+
+async def test_serve_restores_uvicorn_info_after_building_the_listeners(
+    monkeypatch,
+) -> None:
+    """uvicorn.error 가 INFO 로 돌아오는지 본다 (스펙 §2.2).
+
+    uvicorn.Config 생성자는 log_config=None 이어도 자기 log_level 로 이
+    로거의 레벨을 덮어쓰고, 나중에 만드는 관리 쪽(warning)이 이긴다. 그
+    상태로는 uvicorn 의 기동 안내와 "Waiting for connections to close..." 가
+    로그 파일에 남지 않는다 — 종료가 열린 연결에 막혔을 때 유일한 단서다.
+    시작값을 WARNING 으로 박아 두고 serve() 가 그것을 되돌리는지 확인한다.
+    build_servers 를 스텁으로 바꾸지 않는 것이 요점이다. 실제 Config 가
+    레벨을 덮어쓴 **뒤**에 우리 줄이 도는지가 이 테스트가 지키는 성질이다.
+    """
+    uvicorn_error = logging.getLogger("uvicorn.error")
+    saved = uvicorn_error.level
+    uvicorn_error.setLevel(logging.WARNING)
+
+    observed: list[int] = []
+
+    real_build_servers = app_module.build_servers
+
+    class _StubServer:
+        async def serve(self) -> None:
+            observed.append(uvicorn_error.level)
+
+    def build_then_stub(*args, **kwargs):
+        real_build_servers(*args, **kwargs)      # 진짜 Config 가 레벨을 덮어쓴다
+        return _StubServer(), _StubServer()
+
+    monkeypatch.setattr(app_module, "build_servers", build_then_stub)
+    try:
+        await asyncio.wait_for(
+            app_module.serve(
+                host="127.0.0.1",
+                port=_free_port(),
+                admin_port=_free_port(),
+                stale_after=300.0,
+            ),
+            timeout=5,
+        )
+        assert observed == [logging.INFO, logging.INFO]
+    finally:
+        uvicorn_error.setLevel(saved)
+
+
 async def test_serve_binds_the_broadcaster_to_the_running_loop(monkeypatch) -> None:
     """serve()가 실제로 브로드캐스터를 실행 중인 루프에 묶는지 확인한다.
 
@@ -350,6 +440,7 @@ async def test_serve_binds_the_broadcaster_to_the_running_loop(monkeypatch) -> N
 
     broadcaster = _RecordingBroadcaster()
     handle = LoggingHandle(None, None, broadcaster, [], logging.NOTSET)
+    loop_before = asyncio.get_running_loop().get_exception_handler()
 
     await asyncio.wait_for(
         app_module.serve(
@@ -363,3 +454,11 @@ async def test_serve_binds_the_broadcaster_to_the_running_loop(monkeypatch) -> N
     )
 
     assert recorded_loops == [asyncio.get_running_loop()]
+    # 루프 예외 핸들러도 여기서 함께 확인한다. 이 줄이 없으면 serve() 에서
+    # set_exception_handler 호출과 _loop_exception_handler 를 통째로 지워도
+    # 전체 스위트가 통과한다 — 태스크 안에서 난 예외가 로그에 남는다는
+    # 성질을 지키는 테스트가 하나도 없어진다.
+    assert loop_before is None
+    assert asyncio.get_running_loop().get_exception_handler() is (
+        app_module._loop_exception_handler
+    )
