@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
+import subprocess
+import sys
+import time
 from contextlib import asynccontextmanager
 
 import httpx
@@ -20,6 +24,43 @@ def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+async def _port_ready(host: str, port: int) -> bool:
+    """리스닝 소켓이 연결을 받는지 한 번 찔러본다. 실패하면 False."""
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=0.2
+        )
+    except OSError:
+        return False
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except OSError:
+        pass
+    return True
+
+
+def _terminate_and_reap(proc: subprocess.Popen) -> str:
+    """자식 프로세스를 정리하고 지금까지 쌓인 출력을 반환한다.
+
+    실패 진단(진단표: 바인딩 실패, import 오류)이 타임아웃으로 뭉개지지
+    않도록, 종료시키면서 stdout/stderr(합쳐서 리다이렉트됨)를 모은다.
+    """
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    else:
+        proc.wait(timeout=5)
+    output = proc.stdout.read() if proc.stdout else ""
+    if proc.stdout:
+        proc.stdout.close()
+    return output
 
 
 @asynccontextmanager
@@ -75,12 +116,80 @@ async def test_two_clients_share_one_process():
 
                 # 요구사항 3: 두 클라이언트가 같은 프로세스를 본다.
                 # 특정 pid 값이 아니라 '같다'는 것이 요구사항이다.
+                # 주의: 이 in-process 버전은 uvicorn이 이 테스트 프로세스 안에서
+                # asyncio task로 돌기 때문에 구조적으로 항상 참이다 — 세션 공유가
+                # 완전히 깨져 있어도 통과한다. 실제 증명은 별도 OS 프로세스를
+                # 띄우는 test_two_real_processes_share_one_server 가 한다.
                 assert left_ping["pid"] == right_ping["pid"]
 
                 # 요구사항 2: 서버가 두 세션을 모두 알고 있다
                 listing = payload(await left.call_tool("sessions", {}))
                 ids = {s["instance_id"] for s in listing["sessions"]}
                 assert {"inst-left", "inst-right"} <= ids
+
+
+async def test_two_real_processes_share_one_server():
+    """실제 배포 진입점(`python -m mcp_test_server`)을 별도 OS 프로세스로 띄운다.
+
+    위 test_two_clients_share_one_process 의 pid 비교는 uvicorn이 테스트
+    프로세스 안에서 asyncio task로 도는 구조상 항상 참이다. 이 테스트가
+    "서로 다른 두 세션이 실제로 별도 프로세스 하나를 공유한다"는 프로젝트의
+    핵심 요구사항을 증명하는 유일한 테스트다.
+    """
+    port = free_port()
+    admin_port = free_port()
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "mcp_test_server",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--admin-port",
+            str(admin_port),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        url = f"http://127.0.0.1:{port}/mcp"
+
+        # 포트를 폴링한다 — 고정 sleep이 아니라 자체 데드라인을 둬서,
+        # 바인딩 실패나 import 오류가 30초 타임아웃 뒤에 뭉개지지 않고
+        # 자기 원인 그대로 드러나게 한다.
+        deadline = time.monotonic() + 20.0
+        while True:
+            if proc.poll() is not None:
+                output = proc.stdout.read() if proc.stdout else ""
+                pytest.fail(
+                    "서버 프로세스가 준비되기 전에 종료됨 "
+                    f"(exit={proc.returncode}):\n{output}"
+                )
+            if await _port_ready("127.0.0.1", port):
+                break
+            if time.monotonic() > deadline:
+                output = _terminate_and_reap(proc)
+                pytest.fail(f"서버가 20초 안에 포트를 열지 않음:\n{output}")
+            await asyncio.sleep(0.05)
+
+        async with client_for(url, "inst-left", "left") as left:
+            async with client_for(url, "inst-right", "right") as right:
+                left_ping = payload(await left.call_tool("ping", {}))
+                right_ping = payload(await right.call_tool("ping", {}))
+
+                # 두 클라이언트가 같은 (별도) 프로세스를 본다
+                assert left_ping["pid"] == right_ping["pid"]
+                # 그 프로세스가 이 테스트 자신이 아니라 진짜 별도 프로세스다
+                assert left_ping["pid"] != os.getpid()
+
+                listing = payload(await left.call_tool("sessions", {}))
+                ids = {s["instance_id"] for s in listing["sessions"]}
+                assert {"inst-left", "inst-right"} <= ids
+    finally:
+        _terminate_and_reap(proc)
 
 
 async def test_whoami_reflects_the_calling_session():
