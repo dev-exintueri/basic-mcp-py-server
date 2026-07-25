@@ -172,6 +172,60 @@ async def test_admin_app_reports_the_mcp_endpoint():
     assert body["mcp_endpoint"] == "http://127.0.0.1:9000/mcp"
 
 
+async def test_serve_obtains_its_listeners_from_build_servers(monkeypatch):
+    """serve()가 실제로 build_servers를 거쳐 리스너를 만드는지 확인한다.
+
+    관리 리스너가 루프백에 고정된다는 성질은 build_servers 하나에만
+    묶여 있다. 누군가 serve() 안에 uvicorn.Config(admin_app, host=host, ...)를
+    다시 인라인으로 박아 넣으면 build_servers 테스트는 그대로 통과하면서도
+    그 고정은 실제로 실행되는 경로에서 사라진다. build_servers를 대체물로
+    바꿔치기해서 serve()가 그 함수를 통해서만 리스너를 얻는지를 직접
+    확인해야 이 구멍이 막힌다. host는 ADMIN_HOST("127.0.0.1")와 다른
+    루프백 별칭(localhost)을 써서, build_servers에 실제로 넘어간 인자를
+    보는 것인지 우연히 ADMIN_HOST와 일치해 통과하는 것인지를 가른다.
+    두 스텁 모두 실제로 await됐는지도 함께 확인한다: mcp 쪽만 build_servers를
+    거치고 admin 쪽이 여전히 인라인으로 만들어지는 절반짜리 우회라면, 그
+    admin_server는 진짜 uvicorn.Server라 바인딩을 시도하며 멈춘다 — 아래
+    wait_for가 그 경우를 시간 초과로 실패시킨다.
+    """
+    import socket
+
+    def free_port() -> int:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            return probe.getsockname()[1]
+
+    port = free_port()
+    admin_port = free_port()
+
+    calls = []
+    awaited: list[str] = []
+
+    class _StubServer:
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        async def serve(self) -> None:
+            awaited.append(self._name)
+
+    def fake_build_servers(mcp_app, admin_app, *, host, port, admin_port):
+        calls.append({"host": host, "port": port, "admin_port": admin_port})
+        return _StubServer("mcp"), _StubServer("admin")
+
+    monkeypatch.setattr(app_module, "build_servers", fake_build_servers)
+
+    await asyncio.wait_for(
+        app_module.serve(
+            host="localhost", port=port, admin_port=admin_port, stale_after=300.0
+        ),
+        timeout=5,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["host"] == "localhost"
+    assert sorted(awaited) == ["admin", "mcp"]
+
+
 async def test_purge_loop_uses_the_injected_clock(monkeypatch):
     """purge_loop이 실제 시각이 아니라 주어진 clock()을 쓰는지 확인한다.
 
