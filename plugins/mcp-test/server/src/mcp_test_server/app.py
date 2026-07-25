@@ -79,10 +79,10 @@ def build_stack(
     return mcp_app, admin_app, registry
 
 
-async def _purge_loop(registry: Registry) -> None:
+async def _purge_loop(registry: Registry, clock: Callable[[], datetime]) -> None:
     while True:
         await asyncio.sleep(_PURGE_INTERVAL_SECONDS)
-        registry.purge(_utcnow())
+        registry.purge(clock())
 
 
 async def serve(
@@ -110,7 +110,7 @@ async def serve(
     print(f"MCP    http://{host}:{port}/mcp")
     print(f"관리   http://{ADMIN_HOST}:{admin_port}/")
 
-    purge = asyncio.create_task(_purge_loop(registry))
+    purge = asyncio.create_task(_purge_loop(registry, _utcnow))
     try:
         await asyncio.gather(mcp_server.serve(), admin_server.serve())
     finally:

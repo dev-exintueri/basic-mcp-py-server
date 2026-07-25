@@ -1,9 +1,11 @@
-from datetime import datetime, timezone
+import asyncio
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
 
 from mcp_test_server.__main__ import parse_args
+from mcp_test_server import app as app_module
 from mcp_test_server.app import (
     ADMIN_HOST,
     DEFAULTS,
@@ -11,6 +13,7 @@ from mcp_test_server.app import (
     build_stack,
     ensure_port_free,
 )
+from mcp_test_server.registry import Registry
 
 T0 = datetime(2026, 7, 25, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -111,3 +114,42 @@ async def test_admin_app_reports_the_mcp_endpoint():
     ) as client:
         body = (await client.get("/api/status")).json()
     assert body["mcp_endpoint"] == "http://127.0.0.1:9000/mcp"
+
+
+async def test_purge_loop_uses_the_injected_clock(monkeypatch):
+    """purge_loop이 실제 시각이 아니라 주어진 clock()을 쓰는지 확인한다.
+
+    레코드의 last_seen은 실제 현재 시각으로 남긴다. purge_after(60초)를
+    넘기려면 clock()이 그로부터 120초 뒤인 미래를 돌려줘야 한다. 만약
+    _purge_loop이 다시 내부에서 _utcnow()를 부르도록 되돌아가면, 실제
+    시각은 last_seen과 거의 같아 purge_after를 넘지 않으므로 레코드가
+    지워지지 않고 아래 대기가 타임아웃으로 실패한다.
+    """
+    monkeypatch.setattr(app_module, "_PURGE_INTERVAL_SECONDS", 0.01)
+
+    registry = Registry(stale_after=300.0, purge_after=60.0)
+    real_now = datetime.now(timezone.utc)
+    registry.touch(
+        instance_id="i1",
+        subject="alice",
+        project="proj",
+        label="label",
+        mcp_session_id=None,
+        now=real_now,
+    )
+    far_future = real_now + timedelta(seconds=120)
+
+    task = asyncio.create_task(
+        app_module._purge_loop(registry, lambda: far_future)
+    )
+    try:
+
+        async def wait_for_purge() -> None:
+            while registry.all():
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_for_purge(), timeout=1.0)
+    finally:
+        task.cancel()
+
+    assert registry.all() == []
