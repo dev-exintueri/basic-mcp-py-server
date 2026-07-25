@@ -66,12 +66,35 @@ class DailyFileHandler(logging.FileHandler):
         return Path(self.baseFilename)
 
     def emit(self, record: logging.LogRecord) -> None:
+        """날짜가 바뀌었으면 파일을 갈아 끼운 뒤 남긴다.
+
+        회전 실패는 이 핸들러 안에서 끝나야 한다. logging 의
+        callHandlers → handle → emit 경로에는 try 가 하나도 없어서, 여기서
+        OSError 가 새면 그것이 호출자의 logger.info() 밖으로 튀어나온다 —
+        접근 로그는 ASGI send 래퍼 안에서, 도구 로그는 모든 도구 호출 안에서
+        돌기 때문에 로그 실패가 요청 처리를 통째로 죽인다(스펙 §4.4).
+
+        상태를 언제 바꾸느냐가 이 코드의 전부다. _day 를 먼저 밀어 두면 다음
+        emit 은 회전 분기를 건너뛰고 stream=None 인 채 FileHandler.emit 으로
+        들어가 프로세스가 사는 내내 똑같이 터진다. 그래서 _open() 이 성공한
+        뒤에야 _day 와 stream 을 옮긴다 — 실패하면 다음 emit 이 회전을 다시
+        시도한다. baseFilename 은 _open() 이 읽는 값이라 미리 넣을 수밖에
+        없으므로, 실패하면 되돌린다. 그러지 않으면 current_path 가 열리지도
+        않은 파일을 가리키고, 그 값은 purge_logs(keep=...) 로 흘러간다.
+        """
         today = self._clock().date()
         if today != self._day:
+            previous = self.baseFilename
             self.close()
-            self._day = today
             self.baseFilename = str(self._path_for(today))
-            self.stream = self._open()
+            try:
+                stream = self._open()
+            except OSError:
+                self.baseFilename = previous
+                self.handleError(record)
+                return
+            self.stream = stream
+            self._day = today
         super().emit(record)
 
 

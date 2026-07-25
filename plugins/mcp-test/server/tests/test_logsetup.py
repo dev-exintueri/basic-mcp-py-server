@@ -103,6 +103,42 @@ def test_current_path_follows_the_rollover(tmp_path: Path) -> None:
     handler.close()
 
 
+def test_a_failed_rollover_neither_raises_nor_wedges_the_handler(tmp_path: Path) -> None:
+    """회전에 실패해도 emit 은 조용히 넘어가고, 길이 열리면 스스로 회복한다.
+
+    두 번 emit 하는 것이 이 테스트의 핵심이다. 한 번만 보면 "_day 를 먼저
+    올려 두는" 구현도 통과한다 — 그 구현의 진짜 증상은 두 번째 emit 부터다.
+    _day 가 이미 다음 날로 가 있으면 회전 분기를 건너뛰고 stream=None 인 채
+    FileHandler.emit 으로 들어가 프로세스가 사는 내내 같은 예외를 낸다.
+
+    막는 방법으로 chmod 를 쓰지 않는다. root 로 돌면 무시되고 뒷정리도
+    번거롭다. 다음 날 파일이 놓일 **바로 그 경로에 디렉토리를 만들어** 두면
+    _open() 이 어느 OS 에서나 IsADirectoryError(=OSError) 를 낸다.
+    """
+    clock = FakeClock(START)
+    handler = DailyFileHandler(tmp_path, 8765, clock)
+    handler.setFormatter(ClockFormatter(clock))
+    handler.emit(make_record("mcp_test_server.app", logging.INFO, "첫날"))
+    first_path = handler.current_path
+
+    blocker = tmp_path / "mcp-test-server.8765.2026-07-26.log"
+    blocker.mkdir()
+    clock.advance(minutes=2)
+
+    handler.emit(make_record("mcp_test_server.app", logging.INFO, "막힌 동안 1"))
+    handler.emit(make_record("mcp_test_server.app", logging.INFO, "막힌 동안 2"))
+
+    # 실패한 회전이 current_path 를 열리지도 않은 파일로 옮겨 놓으면 안 된다.
+    # 이 값은 purge_logs(keep=...) 로 흘러가 "지우면 안 되는 파일"이 된다.
+    assert handler.current_path == first_path
+
+    blocker.rmdir()
+    handler.emit(make_record("mcp_test_server.app", logging.INFO, "회복"))
+    handler.close()
+
+    assert "회복" in (tmp_path / blocker.name).read_text(encoding="utf-8")
+
+
 def test_configure_logging_attaches_to_the_root_logger_so_uvicorn_is_caught(
     tmp_path: Path,
 ) -> None:
