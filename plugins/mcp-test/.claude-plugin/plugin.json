@@ -1,0 +1,21 @@
+{
+  "name": "mcp-test",
+  "description": "여러 Claude 세션이 하나의 파이썬 프로세스에 붙는 MCP 테스트 서버",
+  "version": "0.1.0",
+  "author": { "name": "exintueri" },
+  "userConfig": {
+    "server_url": {
+      "type": "string",
+      "title": "MCP 서버 주소",
+      "description": "테스트 서버의 베이스 URL. 기본값은 로컬 기동 시의 주소",
+      "default": "http://127.0.0.1:8765"
+    },
+    "auth_token": {
+      "type": "string",
+      "title": "인증 토큰",
+      "description": "비어 있지 않으면 통과한다. 이 값이 관리 화면의 세션 식별자로 표시된다",
+      "sensitive": true,
+      "required": true
+    }
+  }
+}

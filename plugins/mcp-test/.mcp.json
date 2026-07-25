@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "test-server": {
+      "type": "http",
+      "url": "${user_config.server_url}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${user_config.auth_token}",
+        "X-Client-Project": "${CLAUDE_PROJECT_DIR}",
+        "X-Client-Label": "${MCP_TEST_LABEL:-unnamed}"
+      },
+      "headersHelper": "${CLAUDE_PLUGIN_ROOT}/scripts/connection-id.sh"
+    }
+  }
+}
