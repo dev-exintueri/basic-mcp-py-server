@@ -4,19 +4,27 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import socket
 import sys
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 
 import uvicorn
-from starlette.applications import Starlette
 from starlette.types import ASGIApp
 
+from .access import AccessLogMiddleware
 from .admin import build_admin_app
 from .auth import AuthMiddleware
+from .logpaths import purge_logs
+from .logsetup import LoggingHandle
+from .logstream import LogBroadcaster
 from .mcp_server import build_mcp
 from .registry import Registry
+
+logger = logging.getLogger("mcp_test_server.app")
+registry_logger = logging.getLogger("mcp_test_server.registry")
 
 # 관리 리스너는 루프백에 고정한다. 인증이 없는 리스너이므로 이 값을
 # 바꿀 수 있는 통로를 만들지 않는다.
@@ -98,32 +106,42 @@ def build_stack(
     admin_port: int,
     stale_after: float,
     clock: Callable[[], datetime] = _utcnow,
-) -> tuple[ASGIApp, Starlette, Registry]:
+    broadcaster: LogBroadcaster | None = None,
+    log_file: Callable[[], Path | None] = lambda: None,
+) -> tuple[ASGIApp, ASGIApp, Registry]:
     """MCP 앱, 관리 앱, 그리고 둘이 공유하는 레지스트리를 만든다.
 
     admin_port는 지금 쓰지 않는다. 나중에 관리 앱 쪽에 인증이나 Origin
     검사를 붙일 때 자기 포트를 알아야 하므로 자리를 비워 둔다.
+
+    두 앱 모두 AccessLogMiddleware 로 감싼다. 관리 앱만 빼면 접근 로그가
+    반쪽이 되고, uvicorn 의 access log 를 껐으므로 그쪽 요청은 어디에도
+    남지 않는다.
     """
     started_at = clock()
     registry = Registry(stale_after=stale_after)
 
     mcp = build_mcp(registry, started_at=started_at, clock=clock)
-    mcp_app = AuthMiddleware(
-        mcp.streamable_http_app(), registry=registry, clock=clock
+    mcp_app = AccessLogMiddleware(
+        AuthMiddleware(mcp.streamable_http_app(), registry=registry, clock=clock)
     )
 
-    admin_app = build_admin_app(
-        registry,
-        started_at=started_at,
-        clock=clock,
-        mcp_endpoint=f"http://{endpoint_host(host)}:{port}/mcp",
+    admin_app = AccessLogMiddleware(
+        build_admin_app(
+            registry,
+            started_at=started_at,
+            clock=clock,
+            mcp_endpoint=f"http://{endpoint_host(host)}:{port}/mcp",
+            broadcaster=broadcaster,
+            log_file=log_file,
+        )
     )
     return mcp_app, admin_app, registry
 
 
 def build_servers(
     mcp_app: ASGIApp,
-    admin_app: Starlette,
+    admin_app: ASGIApp,
     *,
     host: str,
     port: int,
@@ -134,20 +152,72 @@ def build_servers(
     serve() 안에 인라인으로 두면 "관리 리스너만은 ADMIN_HOST에 고정된다"는
     성질을 테스트가 확인할 방법이 없다. 바인딩 없이 설정만 돌려주는 함수로
     떼어 내 그 성질을 검증 가능하게 만든다.
+
+    log_config=None 은 uvicorn 이 자기 핸들러를 설치하지 못하게 한다. uvicorn.error
+    로거는 handlers=0, propagate=True 를 유지하므로 여전히 루트로 전파되지만,
+    Config 생성자가 그때마다 이 로거의 레벨을 자기 log_level 로 다시 맞춘다 —
+    나중에 만든 관리 쪽(warning)이 이겨 실제로는 WARNING 이상만 파일에 남는다.
+    uvicorn 의 기동 안내(INFO)는 걸러지지만 크래시로 뜨는 ERROR 는 그대로 남으므로
+    두 리스너 다 잃는 정보는 없다 — 기동 안내는 serve() 가 자기 print/logger로
+    이미 남긴다. access_log=False 인 이유는 AccessLogMiddleware 가 양쪽 앱에 대해
+    같은 형식으로 남기기 때문이다.
     """
     mcp_server = uvicorn.Server(
-        uvicorn.Config(mcp_app, host=host, port=port, log_level="info")
+        uvicorn.Config(
+            mcp_app,
+            host=host,
+            port=port,
+            log_level="info",
+            log_config=None,
+            access_log=False,
+        )
     )
     admin_server = uvicorn.Server(
-        uvicorn.Config(admin_app, host=ADMIN_HOST, port=admin_port, log_level="warning")
+        uvicorn.Config(
+            admin_app,
+            host=ADMIN_HOST,
+            port=admin_port,
+            log_level="warning",
+            log_config=None,
+            access_log=False,
+        )
     )
     return mcp_server, admin_server
 
 
-async def _purge_loop(registry: Registry, clock: Callable[[], datetime]) -> None:
+async def _purge_loop(
+    registry: Registry,
+    clock: Callable[[], datetime],
+    log_dir: Path | None,
+    log_file: Callable[[], Path | None],
+) -> None:
     while True:
         await asyncio.sleep(_PURGE_INTERVAL_SECONDS)
-        registry.purge(clock())
+        now = clock()
+        registry.purge(now)
+        if log_dir is not None:
+            removed, warnings = purge_logs(log_dir, now, keep=log_file())
+            if removed:
+                registry_logger.info("오래된 로그 %d개를 지웠다", removed)
+            for warning in warnings:
+                logger.warning("%s", warning)
+
+
+def _loop_exception_handler(
+    loop: asyncio.AbstractEventLoop, context: dict[str, object]
+) -> None:
+    """태스크 안에서 난 예외는 main() 까지 오지 않는다.
+
+    purge 태스크와 uvicorn 의 커넥션별 태스크가 여기 걸린다. 이걸 걸지
+    않으면 그 예외들은 asyncio 의 기본 핸들러가 stderr 로만 흘려보내고,
+    stderr 는 아무 데도 가지 않는다.
+    """
+    exc = context.get("exception")
+    message = context.get("message", "이벤트 루프에서 처리되지 않은 예외")
+    if isinstance(exc, BaseException):
+        logger.error("%s", message, exc_info=exc)
+    else:
+        logger.error("%s", message)
 
 
 async def serve(
@@ -156,6 +226,7 @@ async def serve(
     port: int,
     admin_port: int,
     stale_after: float,
+    handle: LoggingHandle | None = None,
 ) -> None:
     """두 리스너를 동시에 띄운다. 하나가 죽으면 함께 끝난다."""
     ensure_port_free(host, port)
@@ -164,9 +235,26 @@ async def serve(
     warning = exposure_warning(host)
     if warning is not None:
         print(warning, file=sys.stderr)
+        logger.warning("%s", warning)
+
+    broadcaster = handle.broadcaster if handle else None
+    log_dir = handle.log_dir if handle else None
+    log_file: Callable[[], Path | None] = (
+        (lambda: handle.log_file) if handle else (lambda: None)
+    )
+
+    loop = asyncio.get_running_loop()
+    if broadcaster is not None:
+        broadcaster.bind_loop(loop)
+    loop.set_exception_handler(_loop_exception_handler)
 
     mcp_app, admin_app, registry = build_stack(
-        host=host, port=port, admin_port=admin_port, stale_after=stale_after
+        host=host,
+        port=port,
+        admin_port=admin_port,
+        stale_after=stale_after,
+        broadcaster=broadcaster,
+        log_file=log_file,
     )
     mcp_server, admin_server = build_servers(
         mcp_app, admin_app, host=host, port=port, admin_port=admin_port
@@ -174,9 +262,17 @@ async def serve(
 
     print(f"MCP    http://{host}:{port}/mcp")
     print(f"관리   http://{ADMIN_HOST}:{admin_port}/")
+    if log_dir is not None:
+        print(f"로그   {log_file()}")
+        # 기동 직후 한 번 청소한다. _purge_loop 는 10분 뒤에야 처음 돈다.
+        _, warnings = purge_logs(log_dir, _utcnow(), keep=log_file())
+        for message in warnings:
+            logger.warning("%s", message)
+    logger.info("서버 기동 MCP=%s:%s 관리=%s:%s", host, port, ADMIN_HOST, admin_port)
 
-    purge = asyncio.create_task(_purge_loop(registry, _utcnow))
+    purge = asyncio.create_task(_purge_loop(registry, _utcnow, log_dir, log_file))
     try:
         await asyncio.gather(mcp_server.serve(), admin_server.serve())
     finally:
         purge.cancel()
+        logger.info("서버 종료")
