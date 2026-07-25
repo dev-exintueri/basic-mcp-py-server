@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 
 import httpx
@@ -154,3 +155,299 @@ async def test_index_page_escapes_session_values():
         response = await client.get("/")
     assert "<script>alert(1)</script>" not in response.text
     assert "&lt;script&gt;" in response.text
+
+
+async def test_page_has_no_meta_refresh_so_sse_survives() -> None:
+    """전체 새로고침은 EventSource 연결을 5초마다 끊는다."""
+    registry = make_registry()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=build_app(registry)), base_url="http://admin"
+    ) as client:
+        page = await client.get("/")
+    assert "http-equiv=\"refresh\"" not in page.text
+
+
+async def test_sessions_fragment_returns_only_the_table() -> None:
+    registry = make_registry()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=build_app(registry)), base_url="http://admin"
+    ) as client:
+        fragment = await client.get("/fragments/sessions")
+    assert fragment.status_code == 200
+    assert "abc123" in fragment.text
+    assert "<!doctype html>" not in fragment.text.lower()
+
+
+async def test_status_exposes_the_log_paths(tmp_path) -> None:
+    from mcp_test_server.admin import build_admin_app
+
+    log_file = tmp_path / "mcp-test-server.8765.2026-07-25.log"
+    log_file.write_text("x", encoding="utf-8")
+    app = build_admin_app(
+        make_registry(),
+        started_at=T0,
+        clock=lambda: T0,
+        mcp_endpoint="http://127.0.0.1:8765/mcp",
+        log_file=lambda: log_file,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://admin"
+    ) as client:
+        body = (await client.get("/api/status")).json()
+    assert body["log_file"] == str(log_file)
+    assert body["log_dir"] == str(tmp_path)
+
+
+async def test_status_reports_null_when_file_logging_is_off() -> None:
+    registry = make_registry()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=build_app(registry)), base_url="http://admin"
+    ) as client:
+        body = (await client.get("/api/status")).json()
+    assert body["log_file"] is None
+    assert body["log_dir"] is None
+
+
+async def test_page_backfills_the_tail_of_the_log_file(tmp_path) -> None:
+    from mcp_test_server.admin import build_admin_app
+
+    log_file = tmp_path / "mcp-test-server.8765.2026-07-25.log"
+    log_file.write_text("첫 줄\n<script>나쁜것</script>\n", encoding="utf-8")
+    app = build_admin_app(
+        make_registry(),
+        started_at=T0,
+        clock=lambda: T0,
+        mcp_endpoint="http://127.0.0.1:8765/mcp",
+        log_file=lambda: log_file,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://admin"
+    ) as client:
+        page = await client.get("/")
+
+    assert "첫 줄" in page.text
+    assert "&lt;script&gt;" in page.text          # 이스케이프됐다
+    assert "<script>나쁜것</script>" not in page.text
+
+
+async def test_stream_is_503_when_the_broadcaster_is_off() -> None:
+    """브로드캐스터가 없으면 구독을 만들지 않고 503을 돌려준다."""
+    registry = make_registry()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=build_app(registry)), base_url="http://admin"
+    ) as client:
+        response = await client.get("/api/logs/stream")
+    assert response.status_code == 503
+
+
+def _sse_scope(path: str, headers: dict[str, str] | None = None) -> dict:
+    raw_headers = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": raw_headers,
+        "scheme": "http",
+        "server": ("admin", 80),
+        "client": ("test", 12345),
+        "root_path": "",
+    }
+
+
+class _StreamSession:
+    """SSE 라우트를 raw ASGI 로 직접 구동한다.
+
+    httpx.ASGITransport(0.28 기준)는 self.app(...) 이 끝까지 돌아야 Response
+    를 만든다 — 끝나지 않는 스트림과는 근본적으로 안 맞는다 (별도 확인:
+    client.stream() 의 __aenter__ 조차 앱이 완주할 때까지 반환하지 않는다).
+    그래서 스트림을 쓰는 테스트만 scope/receive/send 를 직접 만들어 앱을
+    백그라운드 태스크로 돌리고, 보낸 메시지를 큐로 받아 발행·연결 종료
+    시점을 시험 코드가 직접 조종한다.
+    """
+
+    def __init__(self, app, path: str = "/api/logs/stream", headers=None) -> None:
+        self.messages: asyncio.Queue[dict] = asyncio.Queue()
+        self._disconnect = asyncio.Event()
+
+        async def receive():
+            await self._disconnect.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            await self.messages.put(message)
+
+        self.task = asyncio.create_task(
+            app(_sse_scope(path, headers), receive, send)
+        )
+
+    async def _next(self, timeout: float = 5.0) -> dict:
+        return await asyncio.wait_for(self.messages.get(), timeout=timeout)
+
+    async def start(self, timeout: float = 5.0) -> dict:
+        """http.response.start 메시지를 받는다. 이 시점엔 구독도 이미 끝나 있다 —
+        라우트 핸들러가 subscribe() 를 부르고 나서야 StreamingResponse 가
+        만들어지고, 그래야 첫 send() 가 나가기 때문이다."""
+        message = await self._next(timeout)
+        assert message["type"] == "http.response.start"
+        return message
+
+    async def body(self, timeout: float = 5.0) -> bytes:
+        message = await self._next(timeout)
+        assert message["type"] == "http.response.body"
+        return message["body"]
+
+    async def aclose(self, timeout: float = 5.0) -> None:
+        self._disconnect.set()
+        await asyncio.wait_for(self.task, timeout=timeout)
+
+
+async def test_stream_emits_published_lines() -> None:
+    from mcp_test_server.admin import build_admin_app
+    from mcp_test_server.logstream import LogBroadcaster
+
+    broadcaster = LogBroadcaster()
+    broadcaster.bind_loop(asyncio.get_running_loop())
+    app = build_admin_app(
+        make_registry(),
+        started_at=T0,
+        clock=lambda: T0,
+        mcp_endpoint="http://127.0.0.1:8765/mcp",
+        broadcaster=broadcaster,
+    )
+
+    session = _StreamSession(app)
+    try:
+        start = await session.start()
+        assert start["status"] == 200
+        headers = dict(start["headers"])
+        assert headers[b"content-type"].startswith(b"text/event-stream")
+
+        broadcaster.publish("한 줄")
+        chunk = (await session.body()).decode()
+        assert "data: 한 줄" in chunk
+    finally:
+        await session.aclose()
+
+
+async def test_stream_splits_multiline_records_into_separate_data_fields() -> None:
+    """트레이스백은 여러 줄이다. data: 한 개에 넣으면 SSE 프레이밍이 깨진다."""
+    from mcp_test_server.admin import build_admin_app
+    from mcp_test_server.logstream import LogBroadcaster
+
+    broadcaster = LogBroadcaster()
+    broadcaster.bind_loop(asyncio.get_running_loop())
+    app = build_admin_app(
+        make_registry(),
+        started_at=T0,
+        clock=lambda: T0,
+        mcp_endpoint="http://127.0.0.1:8765/mcp",
+        broadcaster=broadcaster,
+    )
+
+    session = _StreamSession(app)
+    try:
+        await session.start()
+        broadcaster.publish("첫 줄\nTraceback\n  두 번째")
+        chunk = (await session.body()).decode()
+        assert chunk == "data: 첫 줄\ndata: Traceback\ndata:   두 번째\n\n"
+    finally:
+        await session.aclose()
+
+
+async def test_stream_unsubscribes_when_the_client_disconnects() -> None:
+    from mcp_test_server.admin import build_admin_app
+    from mcp_test_server.logstream import LogBroadcaster
+
+    broadcaster = LogBroadcaster()
+    broadcaster.bind_loop(asyncio.get_running_loop())
+    app = build_admin_app(
+        make_registry(),
+        started_at=T0,
+        clock=lambda: T0,
+        mcp_endpoint="http://127.0.0.1:8765/mcp",
+        broadcaster=broadcaster,
+    )
+
+    session = _StreamSession(app)
+    await session.start()
+    broadcaster.publish("x")
+    await session.body()
+    assert broadcaster.subscriber_count == 1
+
+    await session.aclose()
+    assert broadcaster.subscriber_count == 0
+
+
+async def test_gate_blocks_the_log_stream_and_leaks_no_body() -> None:
+    """게이트 테스트의 스트림 판. 기존 테스트는 레지스트리 상태만 본다 —
+    스트림의 실패 방식은 레지스트리를 건드리지 않고 내용만 새는 것이다.
+
+    토큰 없이 막히는 쪽만 보면 구독 수 0이 "라우트가 아예 없어서" 나온
+    값인지 "게이트가 실제로 막아서" 나온 값인지 구분되지 않는다. 그래서
+    토큰을 갖춘 쪽도 함께 확인해, 같은 라우트가 인증을 통과하면 실제로
+    스트림을 돌려준다는 것까지 증명한다.
+    """
+    from mcp_test_server.admin import build_admin_app
+    from mcp_test_server.logstream import LogBroadcaster
+
+    broadcaster = LogBroadcaster()
+    broadcaster.bind_loop(asyncio.get_running_loop())
+    inner = build_admin_app(
+        make_registry(),
+        started_at=T0,
+        clock=lambda: T0,
+        mcp_endpoint="http://127.0.0.1:8765/mcp",
+        broadcaster=broadcaster,
+    )
+    gate = _ThrowawayGate(inner, token="s3cret")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=gate), base_url="http://admin"
+    ) as client:
+        broadcaster.publish("비밀-한-줄")
+        blocked = await client.get("/api/logs/stream")
+    assert blocked.status_code == 401
+    assert "비밀-한-줄" not in blocked.text
+    assert broadcaster.subscriber_count == 0      # 구독조차 만들어지지 않았다
+
+    # 토큰을 갖추면 같은 라우트가 실제로 스트림을 돌려준다 — 위의 0이
+    # 라우트가 없어서 나온 값이 아님을 증명한다.
+    session = _StreamSession(gate, headers={"X-Admin-Token": "s3cret"})
+    try:
+        start = await session.start()
+        assert start["status"] == 200
+        assert broadcaster.subscriber_count == 1
+    finally:
+        await session.aclose()
+
+
+async def test_block_is_recorded_in_the_registry_log(caplog) -> None:
+    import logging
+
+    caplog.set_level(logging.INFO, logger="mcp_test_server.registry")
+    registry = make_registry()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=build_app(registry)), base_url="http://admin"
+    ) as client:
+        await client.post("/api/sessions/abc123/block")
+
+    lines = [r.getMessage() for r in caplog.records if r.name == "mcp_test_server.registry"]
+    assert lines == ["block instance=abc123"]
+
+
+async def test_unknown_instance_is_not_recorded(caplog) -> None:
+    import logging
+
+    caplog.set_level(logging.INFO, logger="mcp_test_server.registry")
+    registry = make_registry()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=build_app(registry)), base_url="http://admin"
+    ) as client:
+        response = await client.post("/api/sessions/nope/block")
+
+    assert response.status_code == 404
+    assert [r for r in caplog.records if r.name == "mcp_test_server.registry"] == []

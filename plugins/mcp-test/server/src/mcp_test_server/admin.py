@@ -12,8 +12,10 @@
 - DNS 리바인딩을 쓰면 그 페이지가 /api/status 응답을 읽을 수도 있다.
   Host 헤더도 검사하지 않는다.
 
-그렇게 새는 값은 연결 ID, 프로젝트 경로, 서버 pid, 그리고 subject 로
-표시되는 토큰이다.
+그렇게 새는 값은 연결 ID, 프로젝트 경로, 서버 pid, subject 로 표시되는
+토큰, 그리고 /api/logs/stream 과 로그 백필로 나가는 로그 내용이다 — 후자는
+범위가 정해져 있지 않다. 무엇이 로그에 찍히느냐에 따라 트레이스백이나
+도구 호출 인자가 그대로 담길 수 있다.
 
 이 상태를 알고도 받아들인다. 로컬 테스트 도구이고 MCP 쪽 인증부터가 비어
 있지 않은 토큰이면 전부 통과시키는 수준이므로, 관리 포트만 방어해 봐야
@@ -25,23 +27,34 @@ tests/test_admin.py 의 test_admin_app_composes_under_an_auth_layer 가
 
 from __future__ import annotations
 
+import asyncio
 import html
+import logging
 import os
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from starlette.routing import Route
 
+from .logpaths import tail_lines
+from .logstream import LogBroadcaster
 from .registry import Registry, session_view
+
+registry_logger = logging.getLogger("mcp_test_server.registry")
 
 _PAGE = """<!doctype html>
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="refresh" content="5">
 <title>MCP 테스트 서버</title>
 <style>
 body {{ font-family: ui-monospace, monospace; margin: 2rem; }}
@@ -50,11 +63,41 @@ th, td {{ border: 1px solid #ccc; padding: .4rem .6rem; text-align: left; }}
 .stale {{ color: #888; }}
 .blocked {{ background: #fee; }}
 .note {{ color: #666; font-size: .9rem; }}
+#log {{ background: #111; color: #ddd; padding: .8rem; height: 24rem;
+        overflow-y: scroll; white-space: pre-wrap; margin-top: .5rem; }}
 </style>
 </head>
 <body>
 <h1>MCP 테스트 서버</h1>
-<p>pid {pid} · uptime {uptime:.0f}s · MCP {endpoint} · 세션 {count}개</p>
+<div id="sessions">{sessions}</div>
+
+<h2>로그</h2>
+<p class="note">{log_note}</p>
+<pre id="log">{log_backfill}</pre>
+
+<script>
+// 세션 표는 폴링, 로그는 SSE. 용도가 다르므로 연결을 따로 둔다.
+setInterval(async () => {{
+  try {{
+    const html = await (await fetch('/fragments/sessions')).text();
+    document.getElementById('sessions').innerHTML = html;
+  }} catch (e) {{ /* 서버가 잠깐 없을 수 있다. 다음 주기에 다시 시도한다. */ }}
+}}, 5000);
+
+const box = document.getElementById('log');
+box.scrollTop = box.scrollHeight;
+new EventSource('/api/logs/stream').onmessage = (event) => {{
+  // 맨 아래를 보고 있을 때만 따라간다. 위로 올려 읽는 중이면 방해하지 않는다.
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  box.textContent += event.data + '\\n';
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}};
+</script>
+</body>
+</html>
+"""
+
+_SESSIONS = """<p>pid {pid} · uptime {uptime:.0f}s · MCP {endpoint} · 세션 {count}개</p>
 <p class="note">차단하면 그 세션은 403을 받고, Claude Code가 headersHelper를
 다시 실행해 <b>새 연결 ID로 되살아난다.</b> 레코드가 사라지고 새 줄이
 나타나는 것이 정상이다.</p>
@@ -63,8 +106,6 @@ th, td {{ border: 1px solid #ccc; padding: .4rem .6rem; text-align: left; }}
 <th>연결 시각</th><th>마지막 호출</th><th>호출</th><th></th></tr>
 {rows}
 </table>
-</body>
-</html>
 """
 
 _ROW = """<tr class="{classes}">
@@ -81,24 +122,14 @@ def build_admin_app(
     started_at: datetime,
     clock: Callable[[], datetime],
     mcp_endpoint: str,
+    broadcaster: LogBroadcaster | None = None,
+    log_file: Callable[[], Path | None] = lambda: None,
 ) -> Starlette:
     def _snapshot() -> tuple[datetime, list[dict[str, object]]]:
         now = clock()
         return now, [session_view(r, registry, now) for r in registry.all()]
 
-    async def status(request: Request) -> JSONResponse:
-        now, views = _snapshot()
-        return JSONResponse(
-            {
-                "pid": os.getpid(),
-                "uptime_seconds": (now - started_at).total_seconds(),
-                "mcp_endpoint": mcp_endpoint,
-                "session_count": len(views),
-                "sessions": views,
-            }
-        )
-
-    async def index(request: Request) -> HTMLResponse:
+    def _sessions_html() -> str:
         now, views = _snapshot()
         rows = "".join(
             _ROW.format(
@@ -117,15 +148,69 @@ def build_admin_app(
             )
             for v in views
         )
+        return _SESSIONS.format(
+            pid=os.getpid(),
+            uptime=(now - started_at).total_seconds(),
+            endpoint=html.escape(mcp_endpoint),
+            count=len(views),
+            rows=rows,
+        )
+
+    async def status(request: Request) -> JSONResponse:
+        now, views = _snapshot()
+        path = log_file()
+        return JSONResponse(
+            {
+                "pid": os.getpid(),
+                "uptime_seconds": (now - started_at).total_seconds(),
+                "mcp_endpoint": mcp_endpoint,
+                "session_count": len(views),
+                "sessions": views,
+                "log_dir": str(path.parent) if path else None,
+                "log_file": str(path) if path else None,
+            }
+        )
+
+    async def sessions_fragment(request: Request) -> HTMLResponse:
+        return HTMLResponse(_sessions_html())
+
+    async def index(request: Request) -> HTMLResponse:
+        path = log_file()
+        if path is None:
+            note = "파일 로깅이 꺼져 있다. 아래는 이 연결 이후의 로그만 보여준다."
+            backfill = ""
+        else:
+            note = f"{html.escape(str(path))} · 최근 200줄"
+            backfill = html.escape("\n".join(tail_lines(path)))
         return HTMLResponse(
             _PAGE.format(
-                pid=os.getpid(),
-                uptime=(now - started_at).total_seconds(),
-                endpoint=html.escape(mcp_endpoint),
-                count=len(views),
-                rows=rows,
+                sessions=_sessions_html(), log_note=note, log_backfill=backfill
             )
         )
+
+    async def log_stream(request: Request) -> StreamingResponse | JSONResponse:
+        if broadcaster is None:
+            return JSONResponse({"error": "로그 스트림이 꺼져 있다"}, status_code=503)
+
+        queue = broadcaster.subscribe()
+
+        async def events():
+            try:
+                while True:
+                    try:
+                        line = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    except asyncio.TimeoutError:
+                        # 유휴 연결이 끊기지 않게 하는 주석 하트비트다.
+                        yield b": ping\n\n"
+                        continue
+                    # 트레이스백은 여러 줄이다. 줄마다 data: 를 붙이지 않으면
+                    # SSE 프레이밍이 깨진다.
+                    payload = "".join(f"data: {part}\n" for part in line.split("\n"))
+                    yield (payload + "\n").encode("utf-8")
+            finally:
+                broadcaster.unsubscribe(queue)
+
+        return StreamingResponse(events(), media_type="text/event-stream")
 
     def _toggle(action: str) -> Callable[[Request], object]:
         async def handler(request: Request):
@@ -139,6 +224,7 @@ def build_admin_app(
                 return JSONResponse(
                     {"error": f"알 수 없는 연결 ID: {instance_id}"}, status_code=404
                 )
+            registry_logger.info("%s instance=%s", action, instance_id)
             if "text/html" in request.headers.get("accept", ""):
                 return RedirectResponse("/", status_code=303)
             return JSONResponse({"instance_id": instance_id, "action": action})
@@ -149,6 +235,8 @@ def build_admin_app(
         routes=[
             Route("/", index),
             Route("/api/status", status),
+            Route("/fragments/sessions", sessions_fragment),
+            Route("/api/logs/stream", log_stream),
             Route(
                 "/api/sessions/{instance_id}/block", _toggle("block"), methods=["POST"]
             ),
