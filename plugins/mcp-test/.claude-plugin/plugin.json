@@ -16,6 +16,11 @@
       "description": "비어 있지 않으면 통과한다. 이 값이 세션 식별자(subject)로 관리 화면과 sessions 도구에 실려 이 서버에 붙은 다른 모든 세션에 보이므로, 진짜 자격 증명이 아니라 alice 같은 알아볼 수 있는 별명을 넣어라",
       "sensitive": true,
       "required": true
+    },
+    "log_dir": {
+      "type": "string",
+      "title": "서버 로그 디렉토리",
+      "description": "비워 두면 ~/.mcp-test-server/logs 를 쓴다. 이 값은 서버가 기동할 때 읽으므로, 바꾸면 서버를 재기동해야 반영된다"
     }
   }
 }

@@ -104,3 +104,12 @@ def test_check_server_script_names_the_start_command_when_the_server_is_down():
 def test_commands_exist():
     for name in ("server-start.md", "server-status.md"):
         assert (PLUGIN_ROOT / "commands" / name).is_file()
+
+
+def test_plugin_declares_a_non_sensitive_log_dir_option() -> None:
+    config = read_json(".claude-plugin/plugin.json")["userConfig"]["log_dir"]
+    assert config["type"] == "string"
+    # 민감으로 표시하면 Keychain 으로 가서 settings.json 에 남지 않고,
+    # 서버가 읽을 수 없게 된다.
+    assert config.get("sensitive") is not True
+    assert "default" not in config
