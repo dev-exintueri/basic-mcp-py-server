@@ -1,0 +1,19 @@
+# Claude Code 로컬 개인 설정 (환경마다 다름)
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 환경
+.env
+.env.*
+
+# OS
+.DS_Store
