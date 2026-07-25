@@ -3,6 +3,13 @@
 미들웨어는 순수 ASGI다. BaseHTTPMiddleware를 쓰지 않는 이유는 응답을 감싸지
 않기 위해서다. 요청 헤더만 읽고 응답에는 손대지 않으므로 스트리밍 응답과
 얽히지 않는다.
+
+X-Client-Instance 는 클라이언트가 스스로 주장하는 값이고 검증하지 않는다.
+sessions 도구가 모든 연결 ID를 모든 세션에 공개하므로, 비어 있지 않은
+토큰만 있으면 누구나 남의 ID로 DELETE 를 보내 레코드를 지우거나 같은 ID로
+호출해 그 세션의 subject/project/label 을 덮어쓸 수 있다. 피해는 제한적이고
+(다음 요청에서 레코드가 다시 생긴다) 이 설계에 내재한 성질이므로 막지
+않는다. 다만 사실로 남겨 둔다.
 """
 
 from __future__ import annotations

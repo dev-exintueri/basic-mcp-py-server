@@ -13,7 +13,7 @@
     "auth_token": {
       "type": "string",
       "title": "인증 토큰",
-      "description": "비어 있지 않으면 통과한다. 이 값이 관리 화면의 세션 식별자로 표시된다",
+      "description": "비어 있지 않으면 통과한다. 이 값이 세션 식별자(subject)로 관리 화면과 sessions 도구에 실려 이 서버에 붙은 다른 모든 세션에 보이므로, 진짜 자격 증명이 아니라 alice 같은 알아볼 수 있는 별명을 넣어라",
       "sensitive": true,
       "required": true
     }
