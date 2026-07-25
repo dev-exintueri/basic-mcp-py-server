@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import socket
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -15,7 +17,15 @@ from mcp_test_server.app import (
     ensure_port_free,
     exposure_warning,
 )
+from mcp_test_server.logsetup import LoggingHandle
+from mcp_test_server.logstream import LogBroadcaster
 from mcp_test_server.registry import Registry
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 T0 = datetime(2026, 7, 25, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -250,7 +260,7 @@ async def test_purge_loop_uses_the_injected_clock(monkeypatch):
     far_future = real_now + timedelta(seconds=120)
 
     task = asyncio.create_task(
-        app_module._purge_loop(registry, lambda: far_future)
+        app_module._purge_loop(registry, lambda: far_future, None, lambda: None)
     )
     try:
 
@@ -263,3 +273,192 @@ async def test_purge_loop_uses_the_injected_clock(monkeypatch):
         task.cancel()
 
     assert registry.all() == []
+
+
+def test_log_dir_flag_is_parsed() -> None:
+    assert parse_args(["--log-dir", "/tmp/x"]).log_dir == "/tmp/x"
+    assert parse_args([]).log_dir is None
+
+
+def test_both_apps_are_wrapped_in_the_access_log_middleware() -> None:
+    """관리 앱만 빠지면 접근 로그가 반쪽이 된다."""
+    from mcp_test_server.access import AccessLogMiddleware
+
+    mcp_app, admin_app, _registry = build_stack(
+        host="127.0.0.1", port=1, admin_port=2, stale_after=300.0
+    )
+    assert isinstance(mcp_app, AccessLogMiddleware)
+    assert isinstance(admin_app, AccessLogMiddleware)
+
+
+async def test_purge_loop_cleans_log_files(tmp_path, monkeypatch) -> None:
+    """청소가 실제로 _purge_loop 를 타는지 본다.
+
+    여기서 purge_logs 를 직접 부르고 결과만 확인하면 루프가 죽어 있어도
+    통과한다. 주기를 0으로 줄여 루프 자신이 지우게 한다.
+    """
+    import os
+
+    old = tmp_path / "mcp-test-server.8765.2026-07-20.log"
+    old.write_text("x", encoding="utf-8")
+    stamp = (T0 - timedelta(hours=200)).timestamp()
+    os.utime(old, (stamp, stamp))
+
+    monkeypatch.setattr(app_module, "_PURGE_INTERVAL_SECONDS", 0.0)
+    task = asyncio.create_task(
+        app_module._purge_loop(
+            Registry(stale_after=300.0), lambda: T0, tmp_path, lambda: None
+        )
+    )
+    try:
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if not old.exists():
+                break
+    finally:
+        task.cancel()
+
+    assert not old.exists()
+
+
+async def test_purge_loop_logs_both_counts_through_their_own_loggers(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """청소 결과 두 줄이 각각 제 로거로 나가는지 본다 (스펙 §2.1).
+
+    개수만 확인하면 로거를 잘못 골라도 통과한다. 포매터의 범주 칸은 로거
+    이름의 마지막 마디를 찍으므로, 로그 파일 청소를 registry 로거로 내보내면
+    세션과 무관한 줄에 `registry` 가 붙는다. 그래서 메시지가 아니라
+    record.name 을 본다.
+    """
+    import os
+
+    old = tmp_path / "mcp-test-server.8765.2026-07-20.log"
+    old.write_text("x", encoding="utf-8")
+    stamp = (T0 - timedelta(hours=200)).timestamp()
+    os.utime(old, (stamp, stamp))
+
+    registry = Registry(stale_after=300.0, purge_after=60.0)
+    registry.touch(
+        instance_id="i1", subject="alice", project="p", label="l",
+        mcp_session_id=None, now=T0 - timedelta(seconds=120),
+    )
+
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(app_module, "_PURGE_INTERVAL_SECONDS", 0.0)
+    task = asyncio.create_task(
+        app_module._purge_loop(registry, lambda: T0, tmp_path, lambda: None)
+    )
+    try:
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if not old.exists() and not registry.all():
+                break
+    finally:
+        task.cancel()
+
+    sessions = [r for r in caplog.records if "세션" in r.getMessage()]
+    files = [r for r in caplog.records if "로그" in r.getMessage()]
+    assert len(sessions) >= 1
+    assert len(files) >= 1
+    assert sessions[0].name == "mcp_test_server.registry"
+    assert "1개" in sessions[0].getMessage()
+    assert files[0].name == "mcp_test_server.app"
+
+
+async def test_serve_restores_uvicorn_info_after_building_the_listeners(
+    monkeypatch,
+) -> None:
+    """uvicorn.error 가 INFO 로 돌아오는지 본다 (스펙 §2.2).
+
+    uvicorn.Config 생성자는 log_config=None 이어도 자기 log_level 로 이
+    로거의 레벨을 덮어쓰고, 나중에 만드는 관리 쪽(warning)이 이긴다. 그
+    상태로는 uvicorn 의 기동 안내와 "Waiting for connections to close..." 가
+    로그 파일에 남지 않는다 — 종료가 열린 연결에 막혔을 때 유일한 단서다.
+    시작값을 WARNING 으로 박아 두고 serve() 가 그것을 되돌리는지 확인한다.
+    build_servers 를 스텁으로 바꾸지 않는 것이 요점이다. 실제 Config 가
+    레벨을 덮어쓴 **뒤**에 우리 줄이 도는지가 이 테스트가 지키는 성질이다.
+    """
+    uvicorn_error = logging.getLogger("uvicorn.error")
+    saved = uvicorn_error.level
+    uvicorn_error.setLevel(logging.WARNING)
+
+    observed: list[int] = []
+
+    real_build_servers = app_module.build_servers
+
+    class _StubServer:
+        async def serve(self) -> None:
+            observed.append(uvicorn_error.level)
+
+    def build_then_stub(*args, **kwargs):
+        real_build_servers(*args, **kwargs)      # 진짜 Config 가 레벨을 덮어쓴다
+        return _StubServer(), _StubServer()
+
+    monkeypatch.setattr(app_module, "build_servers", build_then_stub)
+    try:
+        await asyncio.wait_for(
+            app_module.serve(
+                host="127.0.0.1",
+                port=_free_port(),
+                admin_port=_free_port(),
+                stale_after=300.0,
+            ),
+            timeout=5,
+        )
+        assert observed == [logging.INFO, logging.INFO]
+    finally:
+        uvicorn_error.setLevel(saved)
+
+
+async def test_serve_binds_the_broadcaster_to_the_running_loop(monkeypatch) -> None:
+    """serve()가 실제로 브로드캐스터를 실행 중인 루프에 묶는지 확인한다.
+
+    브로드캐스터를 직접 만들어 bind_loop 를 호출하고 결과만 확인하는
+    테스트는, serve() 안의 broadcaster.bind_loop(loop) 호출을 지워도
+    통과한다 — 그 테스트가 실제로 검증하는 것은 LogBroadcaster 자체이지
+    serve() 가 아니기 때문이다. test_serve_obtains_its_listeners_from_
+    build_servers 와 같은 패턴으로 serve() 를 실제로 끝까지 돌려서, 그
+    안에서 브로드캐스터에 넘겨준 루프가 지금 실행 중인 루프와 같은
+    객체인지를 직접 본다.
+    """
+
+    class _StubServer:
+        async def serve(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        app_module, "build_servers", lambda *a, **k: (_StubServer(), _StubServer())
+    )
+
+    recorded_loops: list[asyncio.AbstractEventLoop] = []
+
+    class _RecordingBroadcaster(LogBroadcaster):
+        def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+            recorded_loops.append(loop)
+            super().bind_loop(loop)
+
+    broadcaster = _RecordingBroadcaster()
+    handle = LoggingHandle(None, None, broadcaster, [], logging.NOTSET)
+    loop_before = asyncio.get_running_loop().get_exception_handler()
+
+    await asyncio.wait_for(
+        app_module.serve(
+            host="127.0.0.1",
+            port=_free_port(),
+            admin_port=_free_port(),
+            stale_after=300.0,
+            handle=handle,
+        ),
+        timeout=5,
+    )
+
+    assert recorded_loops == [asyncio.get_running_loop()]
+    # 루프 예외 핸들러도 여기서 함께 확인한다. 이 줄이 없으면 serve() 에서
+    # set_exception_handler 호출과 _loop_exception_handler 를 통째로 지워도
+    # 전체 스위트가 통과한다 — 태스크 안에서 난 예외가 로그에 남는다는
+    # 성질을 지키는 테스트가 하나도 없어진다.
+    assert loop_before is None
+    assert asyncio.get_running_loop().get_exception_handler() is (
+        app_module._loop_exception_handler
+    )

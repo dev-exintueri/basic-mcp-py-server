@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -278,3 +280,185 @@ async def test_blocked_connection_gets_403_over_the_wire():
 
             restored = await raw.post(url, headers=headers, json={})
             assert restored.status_code != 403
+
+
+async def test_crash_leaves_a_traceback_in_the_log_file(tmp_path) -> None:
+    """SIGTERM 으로 죽이는 테스트는 아무것도 증명하지 못한다.
+
+    terminate() 는 SIGTERM 이고 파이썬은 이를 기본적으로 잡지 않는다.
+    프로세스는 finally 도 atexit 도 실행하지 않고 즉시 끝나므로, 그렇게
+    죽인 뒤 로그를 확인하는 테스트는 통과해도 flush 가 동작한다는 뜻이
+    아니다. 대신 진짜 미처리 예외로 죽인다.
+
+    이 테스트가 실제로 지키는 것은 __main__.main() 의
+    `except BaseException: logger.exception(...)` 한 줄이다 — 그 줄을 지우면
+    이 테스트는 FAIL한다(직접 지우고 확인했다). 반대로 `finally:
+    logging.shutdown()`과 `atexit.register(logging.shutdown)`을 **둘 다**
+    지워도 이 테스트는 여전히 PASS한다: stdlib logging.StreamHandler.emit()이
+    레코드마다 self.flush()를 부르므로, 프로세스가 정리 없이 죽어도 이미 쓴
+    줄은 파일에 남아 있다. 즉 shutdown/atexit 경로에는 이 테스트로 확인되지
+    않는 부분이 남아 있다 — 예를 들어 파일 디스크립터를 명시적으로 닫는
+    것 자체는 여기서 검증되지 않는다.
+    """
+    port = free_port()
+    child = (
+        "import sys\n"
+        "import mcp_test_server.app as app\n"
+        "import mcp_test_server.__main__ as m\n"
+        "async def boom(**kwargs):\n"
+        "    raise RuntimeError('deliberate-crash-marker')\n"
+        # __main__ 이 from .app import serve 로 이름을 끌어왔으므로 양쪽
+        # 모듈 전역을 모두 바꿔야 한다. 한쪽만 바꾸면 패치가 먹지 않고
+        # 서버가 정상 기동해 이 테스트가 멈춘다.
+        "app.serve = boom\n"
+        "m.serve = boom\n"
+        "sys.exit(m.main(['--log-dir', sys.argv[1], '--port', sys.argv[2]]))\n"
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-c", child, str(tmp_path), str(port)],
+        capture_output=True,
+        timeout=60,
+    )
+
+    assert proc.returncode != 0, proc.stderr.decode(errors="replace")
+
+    files = list(tmp_path.glob("mcp-test-server.*.log"))
+    assert files, f"로그 파일이 없다. stderr={proc.stderr.decode(errors='replace')}"
+    text = files[0].read_text(encoding="utf-8", errors="replace")
+    assert "deliberate-crash-marker" in text
+    assert "Traceback" in text
+
+
+@pytest.mark.timeout(90)
+async def test_ctrl_c_exits_even_with_an_open_log_stream(tmp_path) -> None:
+    """관리 화면을 열어 둔 채로도 Ctrl-C 가 먹는지 본다.
+
+    이 기능이 의도한 사용법이 곧 이 버그의 재현 절차다 — 로그를 보려고
+    관리 페이지를 띄워 두면 /api/logs/stream 이 SSE 로 계속 열려 있다.
+    uvicorn 은 timeout_graceful_shutdown 이 없으면 그 연결이 스스로 닫히기를
+    무한정 기다리므로 프로세스가 영영 끝나지 않는다. build_servers 에서 그
+    설정을 빼고 돌리면 이 테스트는 아래 wait 에서 시간 초과로 FAIL 한다
+    (실제로 빼고 확인했다).
+
+    SIGTERM 이 아니라 SIGINT 다. 확인하려는 것이 바로 Ctrl-C 이고, 종료
+    경로도 서로 다르다. returncode 는 보지 않는다 — KeyboardInterrupt 가
+    밖으로 나오는지는 uvicorn 의 시그널 핸들러 설치 여부에 달렸고 이 테스트가
+    지키려는 성질이 아니다. 확인할 것은 오직 "끝난다"이다.
+
+    스트림은 헤더가 도착할 때까지 실제로 열어 둔다. 요청만 보내고 마는
+    방식은 연결이 정말 살아 있었는지 증명하지 못한다.
+    """
+    port = free_port()
+    admin_port = free_port()
+
+    fd, out_path_str = tempfile.mkstemp(prefix="mcp-test-sigint-", suffix=".log")
+    os.close(fd)
+    out_path = Path(out_path_str)
+    try:
+        with open(out_path, "wb") as out_file:
+            proc = subprocess.Popen(
+                [
+                    sys.executable, "-m", "mcp_test_server",
+                    "--host", "127.0.0.1",
+                    "--port", str(port),
+                    "--admin-port", str(admin_port),
+                    "--log-dir", str(tmp_path),
+                ],
+                stdout=out_file,
+                stderr=subprocess.STDOUT,
+            )
+        try:
+            # SSE 는 관리 리스너에 있다. MCP 포트를 기다리면 엉뚱한 것을 본다.
+            deadline = time.monotonic() + 20.0
+            while True:
+                if proc.poll() is not None:
+                    output = _terminate_and_reap(proc, out_path)
+                    pytest.fail(f"서버가 죽었다:\n{output}")
+                if await _port_ready("127.0.0.1", admin_port):
+                    break
+                if time.monotonic() > deadline:
+                    output = _terminate_and_reap(proc, out_path)
+                    pytest.fail(f"관리 리스너가 뜨지 않았다:\n{output}")
+                await asyncio.sleep(0.05)
+
+            async with httpx.AsyncClient() as client:
+                stream = client.stream(
+                    "GET", f"http://127.0.0.1:{admin_port}/api/logs/stream"
+                )
+                response = await stream.__aenter__()
+                assert response.status_code == 200
+                assert "text/event-stream" in response.headers["content-type"]
+
+                started = time.monotonic()
+                proc.send_signal(signal.SIGINT)
+                try:
+                    await asyncio.to_thread(proc.wait, 20)
+                except subprocess.TimeoutExpired:
+                    pytest.fail(
+                        "SSE 연결을 열어 둔 채 SIGINT 를 보냈더니 20초 안에 "
+                        "종료하지 않았다. timeout_graceful_shutdown 이 빠졌다."
+                    )
+                elapsed = time.monotonic() - started
+
+                # 종료 중에 본문이 끊기는 것은 정상이다. 그 예외가 이 테스트를
+                # 실패로 둔갑시키지 않게 한다.
+                with contextlib.suppress(Exception):
+                    await stream.__aexit__(None, None, None)
+
+            # 2초는 유예 시간(3초)보다 **짧게** 잡은 값이다. 로그 스트림이
+            # 종료를 알아채고 스스로 끝나므로 uvicorn 이 기다릴 것이 남지
+            # 않아, 실측은 SSE 를 열지 않았을 때(0.50초)와 사실상 같은
+            # 0.39~0.45초다. should_stop 배선이 사라지면 다시 유예 시간을
+            # 다 쓰고 3.4초가 되므로 이 상한이 그것도 함께 잡는다.
+            assert elapsed < 2.0, f"종료에 {elapsed:.1f}초 걸렸다"
+        finally:
+            _terminate_and_reap(proc, out_path)
+    finally:
+        out_path.unlink(missing_ok=True)
+
+
+async def test_server_starts_even_when_the_log_directory_is_unusable(tmp_path) -> None:
+    """로그 디렉토리 때문에 테스트 서버가 뜨지 않는 것은 거꾸로 간 것이다."""
+    blocker = tmp_path / "blocked"
+    blocker.write_text("파일이라 하위 디렉토리를 만들 수 없다", encoding="utf-8")
+
+    port = free_port()
+    admin_port = free_port()
+    fd, log_path_str = tempfile.mkstemp(prefix="mcp-test-unusable-", suffix=".log")
+    os.close(fd)
+    log_path = Path(log_path_str)
+    try:
+        with open(log_path, "wb") as log_file:
+            proc = subprocess.Popen(
+                [
+                    sys.executable, "-m", "mcp_test_server",
+                    "--host", "127.0.0.1",
+                    "--port", str(port),
+                    "--admin-port", str(admin_port),
+                    "--log-dir", str(blocker / "logs"),
+                ],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+            )
+        try:
+            deadline = time.monotonic() + 20.0
+            while True:
+                if proc.poll() is not None:
+                    output = _terminate_and_reap(proc, log_path)
+                    pytest.fail(f"서버가 죽었다:\n{output}")
+                if await _port_ready("127.0.0.1", port):
+                    break
+                if time.monotonic() > deadline:
+                    output = _terminate_and_reap(proc, log_path)
+                    pytest.fail(f"서버가 뜨지 않았다:\n{output}")
+                await asyncio.sleep(0.1)
+
+            async with client_for(
+                f"http://127.0.0.1:{port}/mcp", "inst-nolog", "nolog"
+            ) as session:
+                assert payload(await session.call_tool("ping", {}))["pid"] > 0
+        finally:
+            _terminate_and_reap(proc, log_path)
+    finally:
+        log_path.unlink(missing_ok=True)

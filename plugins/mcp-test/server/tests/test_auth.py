@@ -132,3 +132,96 @@ async def test_delete_removes_the_record():
         response = await client.request("DELETE", "/mcp", headers=FULL_HEADERS)
     assert response.status_code == 200
     assert registry.get("abc123") is None
+
+
+# --- mask_secret / AUTH_SCOPE_KEY ---
+
+
+def test_mask_secret_is_stable_and_hides_the_token() -> None:
+    from mcp_test_server.auth import mask_secret
+
+    assert mask_secret("alice") == "al…(sha256:2bd806c9)"
+    assert mask_secret("alice") == mask_secret("alice")
+    assert mask_secret("alice") != mask_secret("bob")
+
+
+def test_mask_secret_handles_short_and_empty_values() -> None:
+    from mcp_test_server.auth import mask_secret
+
+    assert mask_secret("") == "(empty)"
+    assert mask_secret("a") == "a…(sha256:ca978112)"
+
+
+async def test_auth_middleware_records_its_decision_in_the_scope() -> None:
+    """access.py 가 읽는 계약이다. 한쪽을 바꾸면 양쪽을 바꿔야 한다."""
+    from mcp_test_server.auth import AUTH_SCOPE_KEY, AuthMiddleware
+
+    captured: dict[str, object] = {}
+
+    async def inner(scope, receive, send) -> None:
+        captured.update(scope.get(AUTH_SCOPE_KEY) or {})
+
+    registry = Registry(stale_after=300.0)
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp",
+        "headers": [
+            (b"authorization", b"Bearer alice"),
+            (b"x-client-instance", b"i1"),
+        ],
+    }
+    await AuthMiddleware(inner, registry=registry, clock=lambda: T0)(scope, None, None)
+
+    assert captured == {"instance": "i1", "subject": "alice", "reason": None}
+
+
+async def test_new_connection_is_logged_once_with_a_masked_subject(caplog) -> None:
+    import logging
+
+    from mcp_test_server.auth import AuthMiddleware
+
+    caplog.set_level(logging.INFO, logger="mcp_test_server.registry")
+    registry = Registry(stale_after=300.0)
+
+    async def inner(scope, receive, send) -> None:
+        return None
+
+    middleware = AuthMiddleware(inner, registry=registry, clock=lambda: T0)
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp",
+        "headers": [
+            (b"authorization", b"Bearer alice"),
+            (b"x-client-instance", b"i1"),
+        ],
+    }
+    await middleware(dict(scope), None, None)
+    await middleware(dict(scope), None, None)      # 두 번째는 새 연결이 아니다
+
+    lines = [r.getMessage() for r in caplog.records if r.name == "mcp_test_server.registry"]
+    assert len(lines) == 1
+    assert "instance=i1" in lines[0]
+    assert "alice" not in lines[0]
+    assert "sha256:" in lines[0]
+
+
+async def test_delete_for_unseen_instance_does_not_log_connected(caplog) -> None:
+    """DELETE는 연결을 맺는 요청이 아니다. registry.get() 이 None인지 보는
+    "처음 보는 연결" 검사를 DELETE 분기보다 먼저 두면, 레지스트리가 모르는
+    인스턴스로 DELETE가 와도 connected 로그가 찍힌다 — remove() 는 지울
+    레코드가 없으면 아무것도 하지 않는데 감사 기록만 연결을 주장하는 셈이다.
+    """
+    import logging
+
+    caplog.set_level(logging.INFO, logger="mcp_test_server.registry")
+    registry = Registry()
+
+    async with build_client(registry) as client:
+        response = await client.request("DELETE", "/mcp", headers=FULL_HEADERS)
+
+    assert response.status_code == 200
+    assert registry.get("abc123") is None
+    lines = [r.getMessage() for r in caplog.records if r.name == "mcp_test_server.registry"]
+    assert lines == []

@@ -14,6 +14,8 @@ sessions 도구가 모든 연결 ID를 모든 세션에 공개하므로, 비어 
 
 from __future__ import annotations
 
+import hashlib
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,8 +26,14 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .registry import Registry
 
+registry_logger = logging.getLogger("mcp_test_server.registry")
+
 UNKNOWN_INSTANCE = "unknown"
 _BEARER_PREFIX = "bearer "
+
+# access.py 가 읽는 스코프 키. 스키마는 이 모듈이 정의한다.
+#   {"instance": str | None, "subject": str | None, "reason": str | None}
+AUTH_SCOPE_KEY = "mcp_test_auth"
 
 
 @dataclass(frozen=True)
@@ -64,6 +72,22 @@ def read_identity(headers: Mapping[str, str]) -> Identity | None:
     )
 
 
+def mask_secret(value: str) -> str:
+    """토큰을 로그에 적을 수 있는 형태로 바꾼다.
+
+    같은 입력은 항상 같은 출력이므로 "이 두 요청은 같은 사람"을 추적할 수
+    있다. 앞 두 글자를 남기는 것은 별명을 쓴 경우 사람이 알아보게 하려는
+    것이다.
+
+    마스킹은 기록 시점에 한다. 포매터가 정규식으로 훑는 방식은 새 필드가
+    생길 때마다 조용히 샌다.
+    """
+    if not value:
+        return "(empty)"
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
+    return f"{value[:2]}…(sha256:{digest})"
+
+
 class AuthMiddleware:
     """MCP 앱 앞에 서서 인증하고, 차단하고, 레지스트리를 갱신한다."""
 
@@ -84,6 +108,11 @@ class AuthMiddleware:
 
         identity = read_identity(Headers(scope=scope))
         if identity is None:
+            scope[AUTH_SCOPE_KEY] = {
+                "instance": None,
+                "subject": None,
+                "reason": "blank-token",
+            }
             await self._reject(
                 scope,
                 receive,
@@ -95,6 +124,11 @@ class AuthMiddleware:
             return
 
         if self.registry.is_blocked(identity.instance_id):
+            scope[AUTH_SCOPE_KEY] = {
+                "instance": identity.instance_id,
+                "subject": identity.subject,
+                "reason": "blocked",
+            }
             await self._reject(
                 scope,
                 receive,
@@ -104,10 +138,30 @@ class AuthMiddleware:
             )
             return
 
+        scope[AUTH_SCOPE_KEY] = {
+            "instance": identity.instance_id,
+            "subject": identity.subject,
+            "reason": None,
+        }
+
         if scope["method"] == "DELETE":
+            # DELETE는 연결을 끊는 요청이지 새로 맺는 요청이 아니다. 아래
+            # "처음 보는 연결" 로그보다 먼저 갈라져야, 레지스트리가 모르는
+            # 인스턴스로 DELETE가 와도 "connected"가 찍히지 않는다 —
+            # remove()는 지울 레코드가 없으면 아무 일도 하지 않는데,
+            # 로그만 연결을 주장하면 감사 기록이 거짓말을 하는 셈이다.
             self.registry.remove(identity.instance_id)
             await self.app(scope, receive, send)
             return
+
+        if self.registry.get(identity.instance_id) is None:
+            # 처음 보는 연결이다. touch 하면 레코드가 생겨 버리므로 그 전에 본다.
+            registry_logger.info(
+                "connected instance=%s subject=%s label=%s",
+                identity.instance_id,
+                mask_secret(identity.subject),
+                identity.label,
+            )
 
         self.registry.touch(
             instance_id=identity.instance_id,
