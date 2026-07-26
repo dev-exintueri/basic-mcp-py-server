@@ -17,6 +17,16 @@
  * - serve() 의 close() 는 shuttingDown 을 가장 먼저 true 로 만든다.
  *   /api/logs/stream 의 while 루프가 그 값을 폴링해 스스로 끝나야 하는데,
  *   순서를 바꿔 서버부터 닫으면 열려 있는 SSE 응답이 종료를 막는다.
+ * - close() 는 GRACEFUL_SHUTDOWN_MS 상한을 반드시 둔다. 관리 포트의 SSE
+ *   로그 스트림과 MCP 포트의 알림용 GET 스트림 둘 다 응답을 무한정 붙들 수
+ *   있는 장수 연결이다 — 클라이언트가 쓰기 버퍼를 실제로 막아 두면(느린
+ *   리더가 응답을 안 읽는 상태로 부하가 쌓이면) `server.close()` 콜백은
+ *   그 소켓이 스스로 끝나기 전까지 영원히 안 온다(실측: 리뷰가 멈춘 리더 +
+ *   800KB 이상에서 SIGKILL 매달림을 재현했다). 상한을 넘기면
+ *   `closeAllConnections()` 로 남은 연결을 강제로 끊는다 — 파이썬 app.py 의
+ *   `_GRACEFUL_SHUTDOWN_SECONDS` → `timeout_graceful_shutdown` 과 같은
+ *   자리, 같은 값이다. 그 독스트링이 "이 값이 없으면 프로세스가 영영
+ *   끝나지 않는다" 고 적은 것과 동일한 이유다.
  *
  * **함께 바꿔야 하는 것.** isLoopback() 은 파이썬 app.py 의 is_loopback()
  * (표준 라이브러리 ipaddress.ip_address(...).is_loopback 판정)을 흉내
@@ -55,6 +65,10 @@ export const DEFAULTS = {
 };
 
 const WILDCARD_HOSTS = new Set(['0.0.0.0', '::']);
+
+// 파이썬 app.py 의 _GRACEFUL_SHUTDOWN_SECONDS(=3)와 같은 값이다. 진행 중인
+// 짧은 요청이 응답을 마치기엔 넉넉하고, 사람이 종료를 기다리기엔 짧다.
+const GRACEFUL_SHUTDOWN_MS = 3000;
 
 // ::ffff:a.b.c.d 형태의 IPv4-mapped IPv6 주소에서 매핑된 IPv4 부분을 꺼낸다.
 // 파이썬 ipaddress.IPv6Address.is_loopback 은 이 형태를 만나면 매핑된
@@ -192,10 +206,32 @@ export async function serve(options: ServeOptions): Promise<{ close: () => Promi
     close: async () => {
       shuttingDown = true;
       clearInterval(purgeTimer);
-      await Promise.all([
+
+      const closed = Promise.all([
         new Promise<void>((resolve) => mcpServer.close(() => resolve())),
         new Promise<void>((resolve) => adminServer.close(() => resolve())),
       ]);
+
+      // server.close() 는 새 연결만 막을 뿐, 이미 맺힌 연결이 스스로 끝나기를
+      // 기다린다 — 느린 리더가 쓰기 버퍼를 막아 두면 그 대기가 무한정
+      // 늘어난다. GRACEFUL_SHUTDOWN_MS 안에 자연 종료가 안 되면
+      // closeAllConnections() 로 남은 연결을 강제로 끊는다. 라우트 하나가
+      // 아니라 여기서 두 서버 모두를 다루는 이유는, 이 함정이
+      // /api/logs/stream 뿐 아니라 MCP 쪽 알림용 GET 스트림에도 똑같이
+      // 있기 때문이다.
+      let timedOut = false;
+      const timeout = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          timedOut = true;
+          resolve();
+        }, GRACEFUL_SHUTDOWN_MS);
+      });
+      await Promise.race([closed, timeout]);
+      if (timedOut) {
+        mcpServer.closeAllConnections();
+        adminServer.closeAllConnections();
+        await closed;
+      }
     },
   };
 }

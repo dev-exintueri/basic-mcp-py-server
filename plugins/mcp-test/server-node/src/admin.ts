@@ -29,13 +29,17 @@
  * - `/api/logs/stream` 의 while 루프는 `shouldStop()` 이 참이 되면 스스로
  *   끝난다. 지우면 SSE 연결이 서버 종료를 막아, close() 가 열린 응답이
  *   끝나기를 무한정 기다리게 된다.
- * - `/api/logs/stream` 이 끝날 때 `res.end()` 콜백 안에서 소켓을 직접
- *   파괴한다. SSE 연결은 keep-alive 로 재사용될 일이 없는데, 파괴하지
- *   않으면 노드 기본 `keepAliveTimeout`(5초)만큼 소켓이 살아남아 서버
- *   종료가 그만큼 늦어진다 — 실측(리뷰): 관리 페이지를 열어 둔 채
- *   SIGTERM 을 보내면 종료가 7초 넘게 걸렸다(파이썬은 0.38초). 파이썬은
- *   `timeout_graceful_shutdown` 으로 상한을 두지만, 노드는 이 연결이 다시
- *   쓰일 일이 없으므로 아예 즉시 닫는 쪽을 골랐다.
+ * - `/api/logs/stream` 이 끝날 때 `res.end()` 콜백 안에서 소켓을 파괴한다 —
+ *   **이건 정상적으로 읽고 있는 리더를 빠르게 회수하기 위한 최선 노력일
+ *   뿐, 종료 상한이 아니다.** 그 콜백은 응답이 실제로 플러시된 **뒤에만**
+ *   온다 — 리더가 쓰기 버퍼를 막아 두면(멈춘 리더, 예: 최소 되어 안 읽는
+ *   브라우저 탭) 콜백 자체가 영원히 안 와서 이 소켓 파괴는 실행되지
+ *   않는다. 실제 상한은 여기 없다 — `app.ts` 의 `close()` 가
+ *   `GRACEFUL_SHUTDOWN_MS`(파이썬 `_GRACEFUL_SHUTDOWN_SECONDS` 와 같은 3초)
+ *   뒤에 두 서버 모두에 `closeAllConnections()` 를 불러 남은 연결을
+ *   강제로 끊는다(실측: 리뷰가 멈춘 리더에 800KB 이상을 흘리면 이 콜백이
+ *   영원히 안 오고, 그 상한 없이는 종료가 SIGKILL 유예 시간(적합성
+ *   `conftest.py` 의 5초)을 넘겨 매달리는 것을 재현했다).
  * - `res.write()` 가 `false` 를 돌려주면(쓰기 버퍼가 참) `drain` 이벤트를
  *   기다린 뒤에 다음 줄을 쓴다. 이 대기를 건너뛰면 `LogBroadcaster` 의
  *   `maxQueue` 상한이 실전에서 결코 닿지 않는다 — sink 의 publish() 가
@@ -48,7 +52,7 @@
 
 import express from 'express';
 import type { Express, Request, Response } from 'express';
-import { once } from 'node:events';
+import { once, type EventEmitter } from 'node:events';
 import { dirname } from 'node:path';
 
 import { accessLog } from './access.js';
@@ -72,8 +76,19 @@ const SESSION_POLL_MS = 30000;
  * 않는다. 그래서 1초마다 깨어나 `shouldAbort()` 를 다시 보고, 참이면 drain
  * 을 기다리지 않고 그냥 돌아간다 — 호출부가 그 뒤 바깥 while 루프에서
  * closed/shouldStop() 을 보고 스스로 끝난다.
+ *
+ * export 하는 이유는 딱 하나, tests/admin.test.ts 가 이 함수의 경주 로직을
+ * (실제 http.Server 를 통한 통합 테스트와 별개로) 직접 겨냥하기 위해서다.
+ * 첫 인자를 `Response` 가 아니라 `EventEmitter` 로 받는 것도 같은 이유다 —
+ * 이 함수는 `res` 를 오직 `once(res, 'drain', ...)` 로만 쓰므로, 테스트가
+ * 진짜 `ServerResponse` 대신 평범한 `EventEmitter` 를 넘겨도 동작이 갈리지
+ * 않는다(둘 다 같은 노드 `events.once()` 메커니즘을 그대로 타므로 "목이
+ * 실제 동작과 다르다" 는 문제가 없다).
  */
-async function waitForWritable(res: Response, shouldAbort: () => boolean): Promise<void> {
+export async function waitForWritable(
+  res: EventEmitter,
+  shouldAbort: () => boolean,
+): Promise<void> {
   while (!shouldAbort()) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1000);
