@@ -168,7 +168,13 @@ ${rows}
 
   const app = express();
   app.use(accessLog());
-  app.use(express.urlencoded({ extended: false }));
+  // limit 은 app.ts 의 buildMcpApp() 이 express.json() 에 준 것과 같은
+  // 근거로 Infinity 다 — 파이썬은 관리 앱 본문을 아예 파싱하지 않으므로
+  // 실질적 상한이 없다. 기본값(100kb)을 그대로 두면 예를 들어
+  // POST /api/sessions/:id/block 에 200KB 본문을 보내는 요청이 노드에서만
+  // 413 으로 실패한다(파이썬은 404 — 본문을 안 보고 라우트 자체가 없다고
+  // 답한다).
+  app.use(express.urlencoded({ extended: false, limit: Infinity }));
 
   app.get('/api/status', (_req: Request, res: Response) => {
     const { now, views } = snapshot();

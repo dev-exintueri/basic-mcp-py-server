@@ -102,6 +102,39 @@ def test_block_on_unknown_instance_is_404(server) -> None:
     assert "error" in response.json()
 
 
+# 서버 소스의 절대 경로나 의존성의 파일·행 번호가 새어 나가는지 보는 단서.
+# test_mcp.py 의 같은 이름의 상수와 목적이 같다 — 파일을 독립적으로 유지하려고
+# 옮기지 않고 그대로 둔다.
+_PATH_LEAK_MARKERS = ("/Users/", "node_modules", "site-packages", ".ts:", ".js:", ".py:")
+
+
+def test_admin_error_responses_are_json_with_an_error_key_and_no_server_paths(server) -> None:
+    """관리 앱의 오류 처리기(있다면)에도 커버리지가 있어야 한다.
+
+    관리 앱은 인증이 없는 리스너다 — 여기서 오류 처리기가 새면 토큰 없이도
+    닿는다(최종 리뷰 재재검토 Minor 1). 노드의 express.urlencoded() 는
+    본문 크기와 무관하게 parameterLimit(기본 1000)을 넘기면 413 을 낸다 —
+    admin.ts 의 limit: Infinity(Minor 2) 는 바이트 크기 상한만 없앨 뿐,
+    이 카운트 상한과는 무관하다. 파이썬은 이 라우트에서 본문을 전혀 읽지
+    않으므로(경로만 보고 404) 두 런타임의 상태 코드가 같을 이유는 없다 —
+    여기서 보는 것은 "오류가 나면 그 응답이 JSON {error} 이고 서버 파일
+    경로를 흘리지 않는다"는 성질 하나뿐이다.
+    """
+    body = "&".join(f"k{i}=v" for i in range(1100))
+    response = httpx.post(
+        f"{server.admin_url}/api/sessions/nope/block",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        content=body.encode("utf-8"),
+        timeout=5,
+    )
+    assert response.headers["content-type"].startswith("application/json")
+    payload = response.json()
+    assert "error" in payload
+    body_text = response.text
+    for marker in _PATH_LEAK_MARKERS:
+        assert marker not in body_text, f"{marker!r} 가 오류 응답에 그대로 새어 나갔다: {body_text}"
+
+
 def test_html_form_post_redirects_to_index(server) -> None:
     asyncio.run(_call_tool(server.mcp_url, HEADERS, "ping", {}))
     instance = HEADERS["X-Client-Instance"]
