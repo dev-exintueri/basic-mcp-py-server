@@ -28,6 +28,18 @@
  * 테스트가 import 할 때 실 서버가 뜨는 부작용 없이 함수만 가져오려면
  * 반드시 있어야 한다 — 지우면 `node --test` 든 vitest 든 이 모듈을 import
  * 하는 순간 실제로 포트를 문다.
+ *
+ * `process.on('unhandledRejection'/'uncaughtException')` 을 여기 두는 이유는
+ * 진입점이라서다 — 등록은 프로세스 전체에 한 번이면 되고, 모듈을 import 할
+ * 때마다 다시 걸릴 필요가 없다. 파이썬 `app.py` 의 `_loop_exception_handler`
+ * 와 자리가 맞는다: 그쪽은 태스크 안에서 난 예외가 `main()` 까지 올라오지
+ * 않고 `loop.set_exception_handler()` 에 잡혀 로그만 남고 나머지 서버는
+ * 계속 도는 것을 확인한 뒤(purge 태스크가 죽어도 mcp/admin 리스너는 안
+ * 죽는다), 두 핸들러 모두 **프로세스를 내리지 않는다** — 로그만 남기고
+ * 계속 돈다. Node 커뮤니티의 일반적인 조언(uncaughtException 뒤에는 상태를
+ * 못 믿으니 내려야 한다)과 다르게 간 것은 의도적이다 — 파이썬 쪽과
+ * "밖에서 구별되지 않는다"는 계약을 지키려면, 여기서 예외를 하나 삼켰다고
+ * 서버 전체가 죽어서는 안 된다.
  */
 
 import { parseArgs as nodeParseArgs } from 'node:util';
@@ -138,6 +150,19 @@ async function main(): Promise<number> {
   }
   configureLogging({ clock, sinks });
 
+  // 파이썬 app.py 의 _loop_exception_handler 와 자리가 맞는다 — 어디서도
+  // 안 잡힌 예외가 stderr 로만 새서 로그 파일에도 SSE 스트림에도 안 남는
+  // 상태를 막는다. 프로세스는 내리지 않는다. 이유는 위 모듈 주석에 있다.
+  // configureLogging() 뒤에 등록해야 getLogger() 가 실제로 어딘가에 쓴다.
+  const crashLogger = getLogger('app');
+  process.on('unhandledRejection', (reason) => {
+    const message = reason instanceof Error ? reason.message : String(reason);
+    crashLogger.error(`처리되지 않은 프로미스 거부: ${message}`);
+  });
+  process.on('uncaughtException', (error) => {
+    crashLogger.error(`처리되지 않은 예외: ${error.message}`);
+  });
+
   // 경로를 정하는 동안에는 남길 곳이 없었다. 준비된 뒤에 남긴다.
   for (const message of warnings) getLogger('app').warn(message);
 
@@ -160,9 +185,19 @@ async function main(): Promise<number> {
   //
   // 적합성 스위트의 픽스처가 SIGTERM 을 보내므로 이 경로는 매 테스트마다
   // 실제로 돈다.
+  //
+  // .catch() 가 반드시 있어야 한다. close() 가 거부되면(예: 두 서버 중
+  // 하나의 close 콜백에서 예외) 이 체인이 unhandled rejection 이 되는데,
+  // 이 시점엔 process.once(signal, ...) 가 이미 자기 핸들러를 뗀 뒤라 —
+  // 프로세스가 그대로 눌러앉아 정상 종료였어야 할 것이 매달리거나, 위
+  // unhandledRejection 핸들러가 로그만 남기고 종료 코드 0 으로 이어지지
+  // 않는다. 실패 시엔 명시적으로 비정상 종료 코드를 낸다.
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     process.once(signal, () => {
-      void handle.close().then(() => process.exit(0));
+      void handle
+        .close()
+        .then(() => process.exit(0))
+        .catch(() => process.exit(1));
     });
   }
   return 0;

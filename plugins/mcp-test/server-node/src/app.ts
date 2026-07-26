@@ -14,6 +14,12 @@
  *   바꿀 수 있는 통로를 만들지 않는다.
  * - createMcpExpressApp() 을 쓰지 않는다. 그 헬퍼는 Host 헤더 검증을
  *   자동으로 걸어 파이썬 서버와 동작이 갈린다.
+ * - buildMcpApp() 에서 express.json() 은 authMiddleware() **뒤**에 붙인다.
+ *   먼저 붙이면 토큰 없는 요청도 본문 파싱(그리고 그 실패)을 먼저 겪는다
+ *   — 파이썬은 AuthMiddleware 가 MCP 앱 바깥이라 본문을 보기도 전에
+ *   401을 낸다(토큰 없음 + 깨진 JSON 은 400 이 아니라 401, 토큰 없음 +
+ *   100KB 넘는 본문은 413 이 아니라 401). authMiddleware 는 헤더만 읽고
+ *   본문에는 손대지 않으므로 순서를 바꿔도 부작용이 없다.
  * - serve() 의 close() 는 shuttingDown 을 가장 먼저 true 로 만든다.
  *   /api/logs/stream 의 while 루프가 그 값을 폴링해 스스로 끝나야 하는데,
  *   순서를 바꿔 서버부터 닫으면 열려 있는 SSE 응답이 종료를 막는다.
@@ -43,6 +49,7 @@ import { isIPv4, isIPv6 } from 'node:net';
 
 import { accessLog } from './access.js';
 import { authMiddleware } from './auth.js';
+import { errorHandler } from './errorHandler.js';
 import { getLogger, type Clock } from './logging.js';
 import { purgeLogs } from './logPaths.js';
 import type { LogBroadcaster } from './logStream.js';
@@ -125,21 +132,50 @@ export interface ServeOptions {
 
 export function buildMcpApp(registry: Registry, startedAt: Date, clock: Clock): Express {
   const app = express();
-  // 순서가 계약이다. 접근 로그가 바깥, 인증이 안쪽.
+  // 순서가 계약이다. 접근 로그가 바깥, 인증이 안쪽, 본문 파싱이 가장
+  // 안쪽이다. authMiddleware 가 express.json() 보다 먼저 와야, 토큰 없는
+  // 요청이 본문을 보기도 전에 401 로 끝난다 — 자세한 이유는 위 모듈
+  // 주석의 "깨면 안 되는 것"에 있다.
   app.use(accessLog());
+  app.use(authMiddleware(registry, clock));
   // express.json() 은 POST 에만 건다. GET(알림용 SSE 스트림)까지 걸면
   // transport 가 읽어야 할 스트림이 소진된다.
-  app.post('/mcp', express.json());
-  app.use(authMiddleware(registry, clock));
+  //
+  // limit 은 실질적으로 무제한이다. 파이썬(starlette/uvicorn)에는 본문
+  // 크기 상한이 없다 — 100KB/1MB/5MB/20MB/100MB 짜리 echo 왕복을 전부
+  // 그대로 받았다(직접 실측, 2026-07-26). express.json() 의 기본
+  // limit(100kb)을 그대로 두면 100KB 를 넘는 echo 가 노드에서만 413 으로
+  // 실패해 계약(§3.1, echo 는 길이 제한 없는 인자)이 깨진다. bytes.parse(Infinity)
+  // 는 Infinity 를 그대로 돌려주므로(body-parser 가 의존하는 bytes 패키지
+  // 확인 완료) 이 값을 그대로 limit 에 써도 안전하다.
+  app.post('/mcp', express.json({ limit: Infinity }));
 
   const route = mcpRoute(() => buildMcp(registry, startedAt, clock));
   app.post('/mcp', route);
   app.get('/mcp', route);
   app.delete('/mcp', route);
+  // 라우트 등록 뒤, 반드시 마지막에 둔다. express 는 등록 순서대로 오류
+  // 미들웨어를 찾으므로 이보다 먼저 두면 그 뒤 라우트의 오류를 못 잡는다.
+  app.use(errorHandler);
   return app;
 }
 
-export async function serve(options: ServeOptions): Promise<{ close: () => Promise<void> }> {
+export interface ServeHandle {
+  close: () => Promise<void>;
+  /**
+   * 관리 리스너가 실제로 바인딩된 주소. null 이면 아직 리스닝 중이 아니다.
+   *
+   * 이 접근자가 없으면 "ADMIN_HOST 고정" 이라는 불변식을 통합 테스트로
+   * 확인할 방법이 없다 — adminServer 는 serve() 안에만 있는 지역 변수라,
+   * ADMIN_HOST 를 options.host 로 잘못 바꾸는 회귀가 생겨도 밖에서는 관찰할
+   * 수단이 없다(파이썬 쪽은 build_servers() 가 바인딩 없이 설정만 돌려줘
+   * 이 성질을 검증하지만, 노드는 listen() 이 serve() 안에서 바로 일어나므로
+   * 같은 분리를 하려면 이 값을 밖으로 내는 쪽이 더 작은 변경이다).
+   */
+  adminAddress: () => string | null;
+}
+
+export async function serve(options: ServeOptions): Promise<ServeHandle> {
   const warning = exposureWarning(options.host);
   if (warning !== null) {
     process.stderr.write(warning + '\n');
@@ -242,6 +278,11 @@ export async function serve(options: ServeOptions): Promise<{ close: () => Promi
         adminServer.closeAllConnections();
         await closed;
       }
+    },
+    adminAddress: () => {
+      const address = adminServer.address();
+      if (address === null) return null;
+      return typeof address === 'string' ? address : address.address;
     },
   };
 }

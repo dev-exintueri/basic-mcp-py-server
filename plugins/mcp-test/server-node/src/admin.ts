@@ -56,6 +56,7 @@ import { once, type EventEmitter } from 'node:events';
 import { dirname } from 'node:path';
 
 import { accessLog } from './access.js';
+import { errorHandler } from './errorHandler.js';
 import { getLogger, type Clock } from './logging.js';
 import { tailLines } from './logPaths.js';
 import type { LogBroadcaster } from './logStream.js';
@@ -326,6 +327,11 @@ new EventSource('/api/logs/stream').onmessage = (event) => {
 
   app.post('/api/sessions/:instanceId/block', toggle('block'));
   app.post('/api/sessions/:instanceId/unblock', toggle('unblock'));
+
+  // 라우트 등록 뒤, 반드시 마지막에 둔다 — errorHandler.ts 모듈 주석 참고.
+  // 이 앱은 인증이 없으므로, 여기 없으면 토큰조차 없이 도달한 예외가
+  // 파일 경로를 흘리는 HTML 로 나간다.
+  app.use(errorHandler);
 
   return app;
 }
