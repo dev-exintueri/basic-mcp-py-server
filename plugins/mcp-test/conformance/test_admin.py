@@ -31,6 +31,28 @@ def test_status_lists_connected_sessions(server) -> None:
     assert payload["sessions"][0]["instance_id"] == HEADERS["X-Client-Instance"]
 
 
+def test_disconnecting_removes_the_session_record(server) -> None:
+    # 일부러 conftest 의 _call_tool 을 안 쓴다. 그 헬퍼는 terminate_on_close=False 로
+    # DELETE 를 억눌러서 슬라이스 2 의 다른 테스트들이 세션을 계속 볼 수 있게 하는
+    # 것이 목적이다 (연결 종료 후에도 레지스트리 레코드가 남아 있어야 하는
+    # 테스트들). 여기서는 정반대로 "연결이 끊기면 레코드가 지워진다"는 것 자체가
+    # 단언 대상이라, SDK 기본 동작(streamablehttp_client 의 terminate_on_close=True)이
+    # 실제로 DELETE 를 보내게 둬야 한다. _call_tool 로 바꾸면 이 테스트가 통과는
+    # 하지만 DELETE 분기를 더 이상 겨냥하지 않게 된다.
+    async def run():
+        async with streamablehttp_client(server.mcp_url, headers=HEADERS) as (r, w, _):
+            async with ClientSession(r, w) as session:
+                await session.initialize()
+                await session.call_tool("ping", {})
+                mid = httpx.get(f"{server.admin_url}/api/status", timeout=5).json()
+                assert mid["session_count"] == 1
+        # 블록을 나가면 SDK 기본 동작(terminate_on_close=True)으로 DELETE 가 발사된다.
+
+    asyncio.run(run())
+    payload = httpx.get(f"{server.admin_url}/api/status", timeout=5).json()
+    assert payload["session_count"] == 0
+
+
 def test_sessions_fragment_escapes_client_supplied_values(server) -> None:
     headers = {**HEADERS, "X-Client-Label": "<script>x</script>"}
 

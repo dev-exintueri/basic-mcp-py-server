@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 from starlette.responses import JSONResponse
-from starlette.testclient import TestClient
 
 from mcp_test_server.admin import build_admin_app
 from mcp_test_server.registry import Registry
@@ -559,14 +558,9 @@ async def test_unknown_instance_is_not_recorded(caplog) -> None:
     assert [r for r in caplog.records if r.name == "mcp_test_server.registry"] == []
 
 
-def test_status_reports_the_runtime() -> None:
+async def test_status_reports_the_runtime() -> None:
     # 401 프로브로는 어느 런타임이 답했는지 알 수 없다. 기동 충돌 안내와
     # /mcp-test:server-status 가 이 필드에 의존한다.
-    app = build_admin_app(
-        Registry(),
-        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
-        mcp_endpoint="http://127.0.0.1:8765/mcp",
-    )
-    with TestClient(app) as client:
-        assert client.get("/api/status").json()["runtime"] == "python"
+    async with build_client(make_registry()) as client:
+        response = await client.get("/api/status")
+    assert response.json()["runtime"] == "python"

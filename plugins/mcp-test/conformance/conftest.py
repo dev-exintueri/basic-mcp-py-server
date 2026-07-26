@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import json
 import socket
 import subprocess
 import time
