@@ -168,6 +168,24 @@ async def test_page_has_no_meta_refresh_so_sse_survives() -> None:
     assert "http-equiv=\"refresh\"" not in page.text
 
 
+async def test_session_polling_is_slow_enough_not_to_flood_the_log_pane() -> None:
+    """폴링 주기는 로그 패널의 자기 소음 총량을 정한다.
+
+    `/fragments/sessions` 요청 하나가 접근 로그에 INFO 한 줄을 남기고, 그 줄이
+    다시 이 패널로 방송된다. 5초였을 때 관리 화면을 열어 두면 화면이 사실상
+    이 줄들로만 채워졌다. 상수를 못박지 않으면 조용히 되돌아온다.
+    """
+    from mcp_test_server import admin as admin_module
+
+    assert admin_module._SESSION_POLL_MS >= 30000
+
+    registry = make_registry()
+    async with build_client(registry) as client:
+        page = await client.get("/")
+    # 상수가 실제로 페이지에 실려 나가는지 본다. 상수만 보면 배선이 끊겨도 통과한다.
+    assert f"}}, {admin_module._SESSION_POLL_MS});" in page.text
+
+
 async def test_sessions_fragment_returns_only_the_table() -> None:
     registry = make_registry()
     async with httpx.AsyncClient(

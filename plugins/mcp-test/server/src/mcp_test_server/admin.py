@@ -56,6 +56,10 @@ _HEARTBEAT_SECONDS = 15.0
 # 로그 스트림이 종료 시작 여부를 다시 확인하는 주기(초). 하트비트 간격과
 # 별개다 — 이 값은 "종료를 얼마나 늦게 알아채도 되는가"만 정한다.
 _STOP_POLL_SECONDS = 1.0
+# 세션 표를 다시 받아오는 주기(밀리초). 이 폴링 자체가 접근 로그에 한 줄을
+# 남기고 그 줄이 다시 아래 로그 패널로 방송되므로, 주기를 짧게 두면 사용자가
+# 보고 있는 화면을 자기 소음으로 채운다. 세션 표는 몇 초 늦어도 무방하다.
+_SESSION_POLL_MS = 30000
 
 _PAGE = """<!doctype html>
 <html lang="ko">
@@ -88,7 +92,7 @@ setInterval(async () => {{
     const html = await (await fetch('/fragments/sessions')).text();
     document.getElementById('sessions').innerHTML = html;
   }} catch (e) {{ /* 서버가 잠깐 없을 수 있다. 다음 주기에 다시 시도한다. */ }}
-}}, 5000);
+}}, {session_poll_ms});
 
 const box = document.getElementById('log');
 box.scrollTop = box.scrollHeight;
@@ -191,7 +195,10 @@ def build_admin_app(
             backfill = html.escape("\n".join(tail_lines(path)))
         return HTMLResponse(
             _PAGE.format(
-                sessions=_sessions_html(), log_note=note, log_backfill=backfill
+                sessions=_sessions_html(),
+                log_note=note,
+                log_backfill=backfill,
+                session_poll_ms=_SESSION_POLL_MS,
             )
         )
 
