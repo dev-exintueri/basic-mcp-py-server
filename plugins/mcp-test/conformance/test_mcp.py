@@ -7,7 +7,7 @@ import json
 
 import httpx
 
-from conftest import HEADERS
+from conftest import HEADERS, _call_tool
 
 
 def test_unauthenticated_post_is_rejected_with_401(server) -> None:
@@ -56,13 +56,6 @@ async def _tools(url: str, headers: dict[str, str]):
             await session.initialize()
             listing = await session.list_tools()
             return get_sid(), listing.tools
-
-
-async def _call_tool(url: str, headers: dict[str, str], tool_name: str, tool_args: dict):
-    async with streamablehttp_client(url, headers=headers) as (r, w, _):
-        async with ClientSession(r, w) as session:
-            await session.initialize()
-            return await session.call_tool(tool_name, tool_args)
 
 
 def test_stateful_session_id_is_issued(server) -> None:

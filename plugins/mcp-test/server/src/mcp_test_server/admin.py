@@ -154,6 +154,7 @@ def build_admin_app(
     broadcaster: LogBroadcaster | None = None,
     log_file: Callable[[], Path | None] = lambda: None,
     should_stop: Callable[[], bool] = lambda: False,
+    runtime: str = "python",
 ) -> Starlette:
     def _snapshot() -> tuple[datetime, list[dict[str, object]]]:
         now = clock()
@@ -192,6 +193,7 @@ def build_admin_app(
         return JSONResponse(
             {
                 "pid": os.getpid(),
+                "runtime": runtime,
                 "uptime_seconds": (now - started_at).total_seconds(),
                 "mcp_endpoint": mcp_endpoint,
                 "session_count": len(views),

@@ -15,6 +15,8 @@ from pathlib import Path
 
 import httpx
 import pytest
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "mcp-test"
@@ -27,6 +29,27 @@ HEADERS = {
     "X-Client-Project": "/tmp/proj",
     "X-Client-Label": "left",
 }
+
+
+async def _call_tool(url: str, headers: dict[str, str], tool_name: str, tool_args: dict):
+    """세션 하나를 열어 도구 하나를 부르고 결과를 돌려준다.
+
+    슬라이스 1(test_mcp.py)과 슬라이스 2(test_admin.py)가 함께 쓴다. 세션을
+    맺기만 하고 결과를 버려도 되는 호출(레지스트리에 레코드를 남기는 것이
+    목적인 경우)도 이 함수로 충분하다 — 반환값을 그냥 안 받으면 된다.
+
+    terminate_on_close=False 를 명시한다. mcp SDK 는 기본값(True)일 때 이
+    async with 블록을 빠져나가는 순간 DELETE 로 세션 종료를 서버에 알리고,
+    서버의 AuthMiddleware 는 DELETE 를 "레지스트리에서 지워라"로 읽는다
+    (auth.py). 그러면 이 함수가 반환하기도 전에 레지스트리 레코드가 이미
+    사라져, 호출부가 이어서 /api/status 를 봤을 때 세션이 안 잡힌다.
+    """
+    async with streamablehttp_client(
+        url, headers=headers, terminate_on_close=False
+    ) as (r, w, _):
+        async with ClientSession(r, w) as session:
+            await session.initialize()
+            return await session.call_tool(tool_name, tool_args)
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
