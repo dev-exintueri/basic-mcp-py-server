@@ -35,8 +35,15 @@ function textResult(payload: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(payload) }] };
 }
 
-/** 도구 호출을 한 줄 남긴다. 파이썬 쪽 _logged 데코레이터와 같은 역할이다. */
-function logged<T>(name: string, extra: Extra | undefined, run: () => T): T {
+/**
+ * 도구 호출을 한 줄 남긴다. 파이썬 쪽 _logged 데코레이터와 같은 역할이다.
+ *
+ * export 하는 이유는 딱 하나, tests/mcpServer.test.ts 가 실패 분기(catch 블록)를
+ * 직접 두들겨 보기 위해서다 — 파이썬 쪽도 같은 이유로 _logged 를 테스트가 직접
+ * import 한다(test_mcp_server.py 의 test_tool_failure_is_logged_as_warning).
+ * 도구 정의 밖에서 이 함수를 부를 다른 이유는 없다.
+ */
+export function logged<T>(name: string, extra: Extra | undefined, run: () => T): T {
   const started = process.hrtime.bigint();
   const instance = instanceIdOf(extra);
   try {
