@@ -14,3 +14,6 @@ dependencies = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 timeout = 60
+markers = [
+    "exposes_port: 실제로 루프백 밖(예: 0.0.0.0)에 바인딩한다. macOS 방화벽 대화상자를 띄울 수 있다. `-m \"not exposes_port\"` 로 거를 수 있다.",
+]

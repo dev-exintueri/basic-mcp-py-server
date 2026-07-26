@@ -85,9 +85,20 @@ class ServerHandle:
             return ""
 
     def log_text(self) -> str:
-        """서버가 남긴 로그 파일 전체. 없으면 빈 문자열."""
+        """서버가 남긴 로그 파일 전체. 없으면 빈 문자열.
+
+        read_text() 가 아니라 read_bytes() 를 디코드한다. read_text() 는
+        텍스트 모드로 열어 universal newlines 변환을 적용하므로, 파일에
+        실제로 적힌 단독 \\r 이 이 시점에 이미 \\n 으로 바뀌어 CR 위조를
+        검증하는 단언(test_control_characters_in_the_path_cannot_forge_a_log_line)
+        이 프로덕션 코드가 CR 을 이스케이프하는지와 무관하게 항상 통과해
+        버린다(실측: 접근 로그의 이스케이프를 지워도 이 값이 바뀌지 않았다).
+        바이트를 디코드하면 그런 변환이 없다.
+        """
         files = sorted(self.log_dir.glob("mcp-test-server.*.log"))
-        return "".join(f.read_text(encoding="utf-8", errors="replace") for f in files)
+        return "".join(
+            f.read_bytes().decode("utf-8", errors="replace") for f in files
+        )
 
 
 def base_command(runtime: str) -> list[str]:
@@ -177,3 +188,42 @@ def server(request: pytest.FixtureRequest, tmp_path: Path):
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=5)
+
+
+@pytest.fixture
+def spawn(request: pytest.FixtureRequest, tmp_path: Path):
+    """서버를 임의의 인자·환경으로 띄우고 종료 코드와 출력을 돌려준다.
+
+    server 픽스처와 달리 기동을 기다리지 않는다. 기동에 실패하는 경우까지
+    관찰해야 하기 때문이다.
+    """
+    runtime = request.config.getoption("--target")
+    _ensure_built(runtime)
+    started: list[subprocess.Popen] = []
+
+    def run(extra: list[str], env_extra: dict[str, str] | None = None, wait: float = 3.0):
+        import os
+        stdout_path = tmp_path / f"spawn-{len(started)}.out"
+        with stdout_path.open("wb") as sink:
+            proc = subprocess.Popen(
+                [*base_command(runtime), *extra],
+                stdout=sink,
+                stderr=subprocess.STDOUT,
+                env={**os.environ, **(env_extra or {})},
+            )
+        started.append(proc)
+        try:
+            proc.wait(timeout=wait)
+        except subprocess.TimeoutExpired:
+            pass
+        return proc, stdout_path.read_text(encoding="utf-8", errors="replace")
+
+    yield run
+
+    for proc in started:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
