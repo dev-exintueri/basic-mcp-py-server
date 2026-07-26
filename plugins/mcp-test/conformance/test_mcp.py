@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+
 import httpx
 
 from conftest import HEADERS
@@ -39,3 +42,84 @@ def test_blank_bearer_token_is_rejected(server) -> None:
         timeout=5,
     )
     assert response.status_code == 401
+
+
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+
+TOOL_NAMES = ["echo", "ping", "sessions", "whoami"]
+
+
+async def _tools(url: str, headers: dict[str, str]):
+    async with streamablehttp_client(url, headers=headers) as (read, write, get_sid):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            listing = await session.list_tools()
+            return get_sid(), listing.tools
+
+
+def test_stateful_session_id_is_issued(server) -> None:
+    session_id, _ = asyncio.run(_tools(server.mcp_url, HEADERS))
+    # stateless 로 두면 이 값이 없다. session_view 의 mcp_session_id 가
+    # 영원히 null 이 되므로 계약이 깨진다.
+    assert session_id
+
+
+def test_exactly_four_tools_are_exposed(server) -> None:
+    _, tools = asyncio.run(_tools(server.mcp_url, HEADERS))
+    assert sorted(t.name for t in tools) == TOOL_NAMES
+
+
+def test_echo_returns_the_input_verbatim(server) -> None:
+    async def run():
+        async with streamablehttp_client(server.mcp_url, headers=HEADERS) as (r, w, _):
+            async with ClientSession(r, w) as session:
+                await session.initialize()
+                return await session.call_tool("echo", {"text": "안녕 🌍"})
+
+    result = asyncio.run(run())
+    assert result.content[0].text == "안녕 🌍"
+
+
+def test_ping_reports_process_shape(server) -> None:
+    async def run():
+        async with streamablehttp_client(server.mcp_url, headers=HEADERS) as (r, w, _):
+            async with ClientSession(r, w) as session:
+                await session.initialize()
+                return await session.call_tool("ping", {})
+
+    payload = json.loads(asyncio.run(run()).content[0].text)
+    # 값이 아니라 형태만 본다. pid 는 두 런타임에서 다르다.
+    assert isinstance(payload["pid"], int)
+    assert isinstance(payload["uptime_seconds"], (int, float))
+    assert isinstance(payload["session_count"], int)
+    assert isinstance(payload["server_time"], str)
+
+
+def test_whoami_reads_the_connection_id_from_the_header(server) -> None:
+    async def run():
+        async with streamablehttp_client(server.mcp_url, headers=HEADERS) as (r, w, _):
+            async with ClientSession(r, w) as session:
+                await session.initialize()
+                return await session.call_tool("whoami", {})
+
+    payload = json.loads(asyncio.run(run()).content[0].text)
+    # SDK 의 콜백 인자 규약을 틀리면 여기서 잡힌다. 인자 없는 도구의 콜백은
+    # (extra) 하나만 받는다 — (_args, extra) 로 쓰면 헤더를 못 읽는다.
+    assert payload["instance_id"] == HEADERS["X-Client-Instance"]
+    assert payload["known"] is True
+
+
+def test_session_view_has_the_contracted_keys(server) -> None:
+    async def run():
+        async with streamablehttp_client(server.mcp_url, headers=HEADERS) as (r, w, _):
+            async with ClientSession(r, w) as session:
+                await session.initialize()
+                return await session.call_tool("sessions", {})
+
+    payload = json.loads(asyncio.run(run()).content[0].text)
+    assert payload["count"] >= 1
+    assert set(payload["sessions"][0]) == {
+        "instance_id", "subject", "project", "label", "mcp_session_id",
+        "connected_at", "last_seen", "call_count", "blocked", "stale",
+    }
