@@ -34,6 +34,7 @@ import { getLogger, type Clock } from './logging.js';
 import { buildMcp } from './mcpServer.js';
 import { mcpRoute } from './mcpRoute.js';
 import { Registry } from './registry.js';
+import { buildAdminApp } from './admin.js';
 
 const logger = getLogger('app');
 
@@ -134,9 +135,24 @@ export async function serve(options: ServeOptions): Promise<{ close: () => Promi
     `서버 기동 MCP=${options.host}:${options.port} 관리=${ADMIN_HOST}:${options.adminPort}`,
   );
 
+  const adminApp = buildAdminApp({
+    registry,
+    startedAt,
+    clock: options.clock,
+    mcpEndpoint: `http://${endpointHost(options.host)}:${options.port}/mcp`,
+    runtime: 'node',
+  });
+  const adminServer = createServer(adminApp);
+  await listen(adminServer, options.adminPort, ADMIN_HOST);
+
+  process.stdout.write(`관리   http://${ADMIN_HOST}:${options.adminPort}/\n`);
+
   return {
     close: async () => {
-      await new Promise<void>((resolve) => mcpServer.close(() => resolve()));
+      await Promise.all([
+        new Promise<void>((resolve) => mcpServer.close(() => resolve())),
+        new Promise<void>((resolve) => adminServer.close(() => resolve())),
+      ]);
     },
   };
 }
