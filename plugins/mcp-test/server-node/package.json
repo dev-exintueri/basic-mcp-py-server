@@ -1,0 +1,23 @@
+{
+  "name": "mcp-test-server-node",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "여러 Claude Code 세션이 하나의 노드 프로세스에 붙는 MCP 테스트 서버",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "express": "^5.2.1",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.0.0"
+  }
+}
