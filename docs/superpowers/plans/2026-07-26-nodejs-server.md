@@ -49,7 +49,11 @@
 | 반환 콘텐츠 | `{ content: [{ type: 'text' as const, text }] }` — TS strict 에서 `as const` 가 필요하다 |
 | tsconfig | `target: ES2022`, `module: NodeNext`, `moduleResolution: NodeNext`, `strict: true` 로 빌드 통과 검증됨 |
 
-**가장 위험한 함정:** `ping` `whoami` `sessions` 는 인자가 없으므로 콜백이 `(extra) => ...` 다. 습관대로 `(_args, extra) => ...` 라고 쓰면 `extra` 가 첫 인자에 들어가 두 번째는 `undefined` 가 되고, **`whoami` 가 연결 ID 를 조용히 놓친다.** 오류는 나지 않는다. 실제로 이 함정에 빠졌다가 발견했다.
+**콜백 인자 규약 함정.** `ping` `whoami` `sessions` 는 인자가 없으므로 콜백이 `(extra) => ...` 다. 습관대로 `(_args, extra) => ...` 라고 쓰면 `extra` 가 첫 인자에 들어가 두 번째는 `undefined` 가 되고 `whoami` 가 연결 ID 를 놓친다. 실제로 이 함정에 빠졌다가 발견했다.
+
+다만 **TypeScript 에서는 `tsc` 가 잡는다** — `TS2345: Target signature provides too few arguments. Expected 2 or more, but got 1` (검증됨). 조용히 지나가는 것은 타입 검사가 없는 JS 에서다. 그러니 과하게 두려워할 필요는 없되, 빌드 오류를 봤을 때 원인을 알아보는 것이 중요하다.
+
+**진짜로 조용한 함정은 헤더 키의 대소문자다.** SDK 는 `extra.requestInfo.headers` 를 **소문자 키**로 준다. `'X-Client-Instance'` 로 찾으면 `undefined` 가 나오고 타입 검사도 통과한다.
 
 ---
 
@@ -342,20 +346,17 @@ git commit -m "test(conformance): 두 런타임을 같은 단언으로 모는 �
 
 ---
 
-## Task 2: 노드 스캐폴딩과 인증
+## Task 2: 노드 스캐폴딩과 로그 줄 형식
 
-노드 서버가 뜨고, 인증 미들웨어가 붙고, 접근 로그가 401 을 남긴다. Task 1 의 두 테스트를 노드로도 통과시킨다.
+프로젝트를 세우고 로그 줄 형식을 못 박는다. 이 태스크의 산출물은 **파이썬이 실제로 낸 줄과 바이트가 같은 문자열을 만드는 함수** 하나다.
 
 **Files:**
 - Create: `plugins/mcp-test/server-node/package.json`, `tsconfig.json`, `.gitignore`
-- Create: `plugins/mcp-test/server-node/src/auth.ts`, `access.ts`, `logging.ts`, `app.ts`, `main.ts`
-- Create: `plugins/mcp-test/server-node/tests/auth.test.ts`
+- Create: `plugins/mcp-test/server-node/src/logging.ts`
+- Create: `plugins/mcp-test/server-node/tests/logging.test.ts`
 
 **Interfaces:**
-- Produces: `auth.ts` → `interface Identity { subject, instanceId, project, label, mcpSessionId }`, `readIdentity(headers: IncomingHttpHeaders): Identity | null`, `maskSecret(value: string): string`, `AUTH_KEY` 심볼로 `req` 에 붙이는 신원.
-- Produces: `logging.ts` → `type Clock = () => Date`, `formatLine(clock, level, category, message): string`, `getLogger(category): Logger` where `Logger = { info(msg), warn(msg), error(msg) }`, `configureLogging(opts)`.
-- Produces: `access.ts` → `accessLog(): RequestHandler`.
-- Produces: `app.ts` → `serve(options): Promise<void>`.
+- Produces: `logging.ts` → `type Clock = () => Date`, `export type Sink = (line: string) => void`, `stamp(clock): string`, `formatLine(clock, level, category, message): string`, `getLogger(category): Logger` (`Logger = { info(msg), warn(msg), error(msg) }`), `configureLogging({clock, sinks})`, `resetLogging()`.
 
 - [ ] **Step 1: `package.json` 을 만든다**
 
@@ -500,7 +501,7 @@ export interface Logger {
   error(message: string): void;
 }
 
-type Sink = (line: string) => void;
+export type Sink = (line: string) => void;
 
 let sinks: Sink[] = [];
 let currentClock: Clock = () => new Date();
@@ -540,7 +541,35 @@ export function getLogger(category: string): Logger {
 Run: `npm test`
 Expected: 2 passed
 
-- [ ] **Step 8: `auth.ts` 의 실패 테스트를 쓴다**
+- [ ] **Step 8: 커밋**
+
+```bash
+git add plugins/mcp-test/server-node
+git commit -m "feat(node): 프로젝트 골격과 로그 줄 형식"
+```
+
+---
+
+## Task 3: 세션 레지스트리와 신원
+
+상태 보유자와 신원 파싱. 둘 다 순수 로직이라 서버를 띄우지 않고 검증한다.
+
+`registry.ts` 를 **먼저** 쓴다. `auth.ts` 가 그것을 import 한다.
+
+**Files:**
+- Create: `plugins/mcp-test/server-node/src/registry.ts`, `src/auth.ts`
+- Create: `plugins/mcp-test/server-node/tests/auth.test.ts`
+
+**Interfaces:**
+- Consumes: `logging.ts` 의 `getLogger`, `Clock` (Task 2)
+- Produces: `registry.ts` → `interface SessionRecord`, `class Registry { touch, get, all, remove, block, unblock, isBlocked, isStale, purge }`, `sessionView(record, registry, now): Record<string, unknown>`
+- Produces: `auth.ts` → `interface Identity { subject, instanceId, project, label, mcpSessionId }`, `interface AuthInfo { instance, subject, reason }`, `readIdentity(headers: IncomingHttpHeaders): Identity | null`, `maskSecret(value: string): string`, `authMiddleware(registry, clock): RequestHandler`, `UNKNOWN_INSTANCE`. 신원은 `req.mcpTestAuth` 로 붙는다.
+
+- [ ] **Step 1: `registry.ts` 를 쓴다**
+
+코드는 아래 "registry.ts 전문" 절에 있다. 그대로 옮긴다.
+
+- [ ] **Step 2: `auth.ts` 의 실패 테스트를 쓴다**
 
 `tests/auth.test.ts`:
 
@@ -581,12 +610,12 @@ describe('readIdentity', () => {
 });
 ```
 
-- [ ] **Step 9: 실패를 확인한다**
+- [ ] **Step 3: 실패를 확인한다**
 
 Run: `npm test`
 Expected: FAIL — `../src/auth.js` 를 찾을 수 없다
 
-- [ ] **Step 10: `auth.ts` 를 쓴다**
+- [ ] **Step 4: `auth.ts` 를 쓴다**
 
 ```ts
 /**
@@ -727,9 +756,21 @@ export function authMiddleware(registry: Registry, clock: Clock): RequestHandler
 }
 ```
 
-- [ ] **Step 11: `registry.ts` 를 쓴다**
+- [ ] **Step 5: 테스트가 통과하는지 본다**
 
-`auth.ts` 가 이것을 import 하므로 먼저 있어야 한다.
+Run: `npm test`
+Expected: 7 passed (`logging` 2 + `auth` 5)
+
+- [ ] **Step 6: 커밋**
+
+```bash
+git add plugins/mcp-test/server-node
+git commit -m "feat(node): 세션 레지스트리와 신원 파싱"
+```
+
+### registry.ts 전문
+
+Step 1 이 옮겨 적을 코드다.
 
 ```ts
 /**
@@ -876,7 +917,22 @@ export function sessionView(
 }
 ```
 
-- [ ] **Step 12: `access.ts` 를 쓴다**
+---
+
+## Task 4: 접근 로그와 기동
+
+노드 서버가 실제로 뜬다. Task 1 의 두 계약 테스트를 노드로도 통과시키는 것이 산출물이다.
+
+**Files:**
+- Create: `plugins/mcp-test/server-node/src/access.ts`, `src/app.ts`, `src/main.ts`
+
+**Interfaces:**
+- Consumes: `Registry`, `authMiddleware`, `maskSecret` (Task 3), `getLogger`, `configureLogging`, `Clock`, `Sink` (Task 2)
+- Produces: `access.ts` → `accessLog(): RequestHandler`
+- Produces: `app.ts` → `ADMIN_HOST`, `DEFAULTS`, `isLoopback(host)`, `endpointHost(host)`, `exposureWarning(host): string | null`, `interface ServeOptions`, `buildMcpApp(registry, clock): Express`, `serve(options): Promise<{ close: () => Promise<void> }>`
+- Produces: `main.ts` → `interface Options`, `parseArgs(argv): Options`
+
+- [ ] **Step 1: `access.ts` 를 쓴다**
 
 ```ts
 /**
@@ -953,7 +1009,7 @@ export function accessLog(): RequestHandler {
 }
 ```
 
-- [ ] **Step 13: `app.ts` 와 `main.ts` 를 쓴다**
+- [ ] **Step 2: `app.ts` 와 `main.ts` 를 쓴다**
 
 `app.ts`:
 
@@ -1171,7 +1227,7 @@ main().then(
 );
 ```
 
-- [ ] **Step 14: 빌드하고 유닛 테스트를 돌린다**
+- [ ] **Step 3: 빌드하고 유닛 테스트를 돌린다**
 
 Run:
 ```bash
@@ -1179,7 +1235,7 @@ cd plugins/mcp-test/server-node && npm run build && npm test
 ```
 Expected: 빌드 성공, 7 passed
 
-- [ ] **Step 15: 노드 타깃으로 적합성 스위트를 돌린다**
+- [ ] **Step 4: 노드 타깃으로 적합성 스위트를 돌린다**
 
 Run:
 ```bash
@@ -1188,7 +1244,7 @@ uv run --directory plugins/mcp-test/conformance pytest -v --target=node
 ```
 Expected: 2 passed
 
-- [ ] **Step 16: 파이썬 타깃이 여전히 통과하는지 본다 (회귀)**
+- [ ] **Step 5: 파이썬 타깃이 여전히 통과하는지 본다 (회귀)**
 
 Run:
 ```bash
@@ -1196,16 +1252,16 @@ uv run --directory plugins/mcp-test/conformance pytest -v --target=python
 ```
 Expected: 2 passed
 
-- [ ] **Step 17: 커밋**
+- [ ] **Step 6: 커밋**
 
 ```bash
 git add plugins/mcp-test/server-node
-git commit -m "feat(node): 노드 서버 골격과 인증, 접근 로그"
+git commit -m "feat(node): 접근 로그와 두 리스너 기동"
 ```
 
 ---
 
-## Task 3: 슬라이스 1 — MCP 계약을 스위트에 적는다
+## Task 5: 슬라이스 1 — MCP 계약을 스위트에 적는다
 
 노드에 아직 `/mcp` 가 없다. 파이썬으로 통과하고 노드로 실패하는 것을 확인하는 것이 이 태스크의 산출물이다.
 
@@ -1332,14 +1388,14 @@ git commit -m "test(conformance): MCP 핵심의 계약을 적는다"
 
 ---
 
-## Task 4: 슬라이스 1 — 노드 MCP 구현
+## Task 6: 슬라이스 1 — 노드 MCP 구현
 
 **Files:**
 - Create: `plugins/mcp-test/server-node/src/mcpServer.ts`, `src/mcpRoute.ts`
 - Modify: `plugins/mcp-test/server-node/src/app.ts`
 
 **Interfaces:**
-- Consumes: `Registry`, `sessionView` (Task 2), `Clock` (Task 2)
+- Consumes: `Registry`, `sessionView` (Task 3), `Clock` (Task 2)
 - Produces: `mcpServer.ts` → `buildMcp(registry, startedAt, clock): McpServer`
 - Produces: `mcpRoute.ts` → `mcpRoute(makeServer: () => McpServer): RequestHandler`
 
@@ -1575,8 +1631,22 @@ Expected: 8 passed
 
 이 저장소에서 가장 흔한 실패는 "통과하지만 아무것도 증명하지 않는 테스트" 다. 추론하지 말고 **실제로 깨 본다.**
 
-`mcpServer.ts` 의 `whoami` 콜백을 `(extra) =>` 에서 `(_args: unknown, extra: Extra) =>` 로 잠깐 바꾸고 빌드한 뒤 스위트를 돌린다.
+콜백 인자 개수를 바꾸는 것으로는 확인할 수 없다. `(_args, extra) =>` 로 바꾸면 `tsc` 가 먼저 잡는다 (`TS2345: Target signature provides too few arguments`) — 검증됨. 그러니 타입 검사를 통과하면서 동작만 깨는 변이를 쓴다.
 
+`mcpServer.ts` 의 `instanceIdOf` 에서 조회 키를 잠깐 바꾼다:
+
+```ts
+  const raw = extra?.requestInfo?.headers?.['X-Client-Instance'];  // 대문자로
+```
+
+SDK 는 헤더 키를 **소문자로** 준다. 이것이 문서화된 함정이고, 이 변이는 타입 검사를 통과한다.
+
+Run:
+```bash
+npm run build
+cd /Users/gdsr/workspace/dev-exintueri/basic-mcp-py-server
+uv run --directory plugins/mcp-test/conformance pytest -q --target=node -k whoami
+```
 Expected: `test_whoami_reads_the_connection_id_from_the_header` 가 **FAIL**
 
 확인했으면 되돌린다. 실패하지 않으면 그 테스트는 없는 것이다.
@@ -1595,7 +1665,7 @@ git commit -m "feat(node): MCP 엔드포인트와 도구 4개"
 
 ---
 
-## Task 5: 슬라이스 2 — 관리 API 계약과 파이썬 `runtime` 필드
+## Task 7: 슬라이스 2 — 관리 API 계약과 파이썬 `runtime` 필드
 
 **Files:**
 - Create: `plugins/mcp-test/conformance/test_admin.py`
@@ -1784,7 +1854,7 @@ git commit -m "feat(admin): status 에 runtime 을 싣고 관리 API 계약을 �
 
 ---
 
-## Task 6: 슬라이스 2 — 노드 관리 API 구현
+## Task 8: 슬라이스 2 — 노드 관리 API 구현
 
 **Files:**
 - Create: `plugins/mcp-test/server-node/src/admin.ts`
@@ -2039,7 +2109,7 @@ git commit -m "feat(node): 관리 리스너와 세션 표"
 
 ---
 
-## Task 7: 슬라이스 3 — 로깅 계약을 스위트에 적는다
+## Task 9: 슬라이스 3 — 로깅 계약을 스위트에 적는다
 
 **Files:**
 - Create: `plugins/mcp-test/conformance/test_logging.py`
@@ -2155,14 +2225,27 @@ def test_tool_call_is_logged_under_call(server) -> None:
     assert message.endswith(" ok")
 
 
-def test_newlines_in_the_path_cannot_forge_a_log_line(server) -> None:
-    # 경로는 클라이언트가 정하고 마스킹도 걸리지 않는다. 날것으로 남기면
-    # 요청 하나로 진짜와 구별되지 않는 줄을 만들어 넣을 수 있다.
-    httpx.request("POST", f"{server.admin_url}/api/status%0a2026-01-01T00:00:00Z", timeout=5)
-    for raw in server.log_text().splitlines():
-        match = LINE.match(raw)
-        if match and match.group("category") in OUR_CATEGORIES:
-            assert "\r" not in raw
+def test_control_characters_in_the_path_cannot_forge_a_log_line(server) -> None:
+    """경로는 클라이언트가 정하고 마스킹도 걸리지 않는다.
+
+    날것으로 남기면 요청 하나로 진짜와 구별되지 않는 줄을 만들어 넣을 수
+    있고(위조), 캐리지 리턴은 그보다 나쁘다 — SSE 프레이밍은 줄바꿈만
+    나누므로 캐리지 리턴이 든 줄은 관리 화면에서 통째로 사라진다(은폐).
+    """
+    httpx.request("POST", f"{server.admin_url}/api/status%0d%0aFORGED", timeout=5)
+    text = server.log_text()
+    # splitlines() 로 쪼갠 뒤에 검사하지 않는다. 파이썬의 splitlines() 는
+    # 캐리지 리턴에서도 쪼개므로 어떤 원소에도 그것이 남지 않고, 단언이
+    # 무조건 통과한다. 쪼개지 않은 원문을 본다.
+    assert "\r" not in text
+
+    # 줄 수도 본다. 위조가 성공하면 우리 카테고리 줄이 하나 늘어난다.
+    forged = [
+        raw for raw in text.split("\n")
+        if (m := LINE.match(raw)) and m.group("category") in OUR_CATEGORIES and "FORGED" in raw
+        and not m.group("message").startswith("POST ")
+    ]
+    assert forged == [], f"위조된 줄이 생겼다: {forged}"
 
 
 def test_status_reports_the_log_file(server) -> None:
@@ -2339,7 +2422,7 @@ Expected: 32 passed (`test_mcp` 8 + `test_admin` 8 + `test_logging` 13 + `test_c
 Run: `uv run --directory plugins/mcp-test/conformance pytest -v --target=node`
 Expected: 19 passed, 13 failed
 
-`test_cli.py` 셋은 노드도 **통과한다** — `parseArgs` 의 보관 기간 검증과 `exposureWarning` 은 Task 2 에서 이미 만들었다. `test_logging.py` 13개가 실패한다. 파일 로깅과 SSE 가 아직 없다.
+`test_cli.py` 셋은 노드도 **통과한다** — `parseArgs` 의 보관 기간 검증과 `exposureWarning` 은 Task 4 에서 이미 만들었다. `test_logging.py` 13개가 실패한다. 파일 로깅과 SSE 가 아직 없다.
 
 - [ ] **Step 6: 커밋**
 
@@ -2350,16 +2433,16 @@ git commit -m "test(conformance): 로그 줄과 파일, CLI 의 계약을 적는
 
 ---
 
-## Task 8: 슬라이스 3 — 노드 로깅 구현
+## Task 10: 슬라이스 3 — 로그 경로와 청소
+
+경로 해석과 파일 청소. 서버를 띄우지 않고 검증한다. **설계 문서가 "적합성 스위트가 아니라 노드 단위 테스트가 보증한다" 고 적은 `settings.json` 층이 여기 있다.**
 
 **Files:**
-- Create: `plugins/mcp-test/server-node/src/logPaths.ts`, `src/logStream.ts`
-- Modify: `plugins/mcp-test/server-node/src/logging.ts`, `src/admin.ts`, `src/app.ts`, `src/main.ts`
+- Create: `plugins/mcp-test/server-node/src/logPaths.ts`
 - Create: `plugins/mcp-test/server-node/tests/logPaths.test.ts`
 
 **Interfaces:**
-- Produces: `logPaths.ts` → `resolveLogDir({flag, env, settingsPath}): {dir: string, warnings: string[]}`, `logFileName(port, day): string`, `purgeLogs(dir, now, {maxAgeSeconds, keep}): {removed: number, warnings: string[]}`, `tailLines(path, {lines, maxBytes}): string[]`
-- Produces: `logStream.ts` → `class LogBroadcaster { subscribe(): AsyncIterator, publish(line), unsubscribe(q), subscriberCount }`
+- Produces: `logPaths.ts` → `DEFAULT_LOG_DIR`, `MAX_AGE_SECONDS`, `DEFAULT_SETTINGS_PATH`, `resolveLogDir({flag, env, settingsPath?}): {dir: string, warnings: string[]}`, `logFileName(port: number, day: Date): string`, `purgeLogs(dir, now, {maxAgeSeconds?, keep?}): {removed: number, warnings: string[]}`, `tailLines(path, {lines?, maxBytes?}): string[]`
 
 - [ ] **Step 1: `logPaths.ts` 의 실패 테스트를 쓴다**
 
@@ -2371,7 +2454,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { logFileName, purgeLogs } from '../src/logPaths.js';
+import { logFileName, purgeLogs, resolveLogDir } from '../src/logPaths.js';
 
 describe('logFileName', () => {
   it('포트와 날짜로 이름을 만든다', () => {
@@ -2418,7 +2501,81 @@ describe('purgeLogs', () => {
     expect(readdirSync(dir)).toEqual(['mcp-test-server.8765.2020-01-01.log']);
   });
 });
+
+describe('resolveLogDir', () => {
+  // 이 층은 적합성 스위트가 닿을 수 없다 — 스위트는 CLI 와 HTTP 로만
+  // 서버를 몰고, 이 경로는 홈 디렉토리에 하드코딩돼 있다. 설계 문서가
+  // "노드 단위 테스트가 보증한다" 고 적은 부분이 여기다.
+  function withSettings(contents: string): string {
+    const dir = mkdtempSync(join(tmpdir(), 'settings-'));
+    const path = join(dir, 'settings.json');
+    writeFileSync(path, contents, 'utf8');
+    return path;
+  }
+
+  it('플러그인 설정의 log_dir 을 읽는다', () => {
+    const settingsPath = withSettings(
+      JSON.stringify({
+        pluginConfigs: {
+          'mcp-test@basic-mcp-py-server': { options: { log_dir: '/tmp/from-settings' } },
+        },
+      }),
+    );
+    const { dir, warnings } = resolveLogDir({ flag: null, env: undefined, settingsPath });
+    expect(dir).toBe('/tmp/from-settings');
+    expect(warnings).toEqual([]);
+  });
+
+  it('플래그가 설정을 이긴다', () => {
+    const settingsPath = withSettings(
+      JSON.stringify({
+        pluginConfigs: { 'mcp-test@x': { options: { log_dir: '/tmp/from-settings' } } },
+      }),
+    );
+    const { dir } = resolveLogDir({ flag: '/tmp/from-flag', env: undefined, settingsPath });
+    expect(dir).toBe('/tmp/from-flag');
+  });
+
+  it('환경 변수가 설정을 이긴다', () => {
+    const settingsPath = withSettings(
+      JSON.stringify({
+        pluginConfigs: { 'mcp-test@x': { options: { log_dir: '/tmp/from-settings' } } },
+      }),
+    );
+    const { dir } = resolveLogDir({ flag: null, env: '/tmp/from-env', settingsPath });
+    expect(dir).toBe('/tmp/from-env');
+  });
+
+  it('망가진 JSON 은 경고하고 기본값으로 떨어진다', () => {
+    const settingsPath = withSettings('{ 이건 JSON 이 아니다');
+    const { dir, warnings } = resolveLogDir({ flag: null, env: undefined, settingsPath });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('JSON');
+    expect(dir).toBe(DEFAULT_LOG_DIR);
+  });
+
+  it('log_dir 이 문자열이 아니면 경고한다', () => {
+    const settingsPath = withSettings(
+      JSON.stringify({ pluginConfigs: { 'mcp-test@x': { options: { log_dir: 42 } } } }),
+    );
+    const { dir, warnings } = resolveLogDir({ flag: null, env: undefined, settingsPath });
+    expect(warnings[0]).toContain('문자열이 아니다');
+    expect(dir).toBe(DEFAULT_LOG_DIR);
+  });
+
+  it('설정 파일이 없는 것은 정상이다', () => {
+    const { dir, warnings } = resolveLogDir({
+      flag: null,
+      env: undefined,
+      settingsPath: '/이런/경로는/없다/settings.json',
+    });
+    expect(warnings).toEqual([]);
+    expect(dir).toBe(DEFAULT_LOG_DIR);
+  });
+});
 ```
+
+import 에 `DEFAULT_LOG_DIR` 을 더한다.
 
 - [ ] **Step 2: 실패를 확인한다**
 
@@ -2609,9 +2766,33 @@ export function tailLines(
 - [ ] **Step 4: 유닛 테스트가 통과하는지 본다**
 
 Run: `npm test`
-Expected: 전부 통과
+Expected: 16 passed — `logging` 2 + `auth` 5 + `logPaths` 9 (`logFileName` 1 + `purgeLogs` 2 + `resolveLogDir` 6)
 
-- [ ] **Step 5: `logStream.ts` 를 쓴다**
+- [ ] **Step 5: 커밋**
+
+```bash
+git add plugins/mcp-test/server-node
+git commit -m "feat(node): 로그 경로 해석과 오래된 파일 청소"
+```
+
+---
+
+## Task 11: 슬라이스 3 — 파일 로깅과 SSE 스트림
+
+로그가 파일에 남고 관리 화면에 실시간으로 붙는다. 슬라이스 3 의 나머지 전부다.
+
+**Files:**
+- Create: `plugins/mcp-test/server-node/src/logStream.ts`
+- Modify: `plugins/mcp-test/server-node/src/logging.ts`, `src/admin.ts`, `src/app.ts`, `src/main.ts`
+
+**Interfaces:**
+- Consumes: `logPaths.ts` 의 `resolveLogDir`, `logFileName`, `purgeLogs`, `tailLines` (Task 10)
+- Produces: `logStream.ts` → `class Subscriber { push(line, maxQueue), drain(timeoutMs): Promise<string[]> }`, `class LogBroadcaster { subscribe(): Subscriber, unsubscribe(s), publish(line), subscriberCount }`
+- Produces: `logging.ts` 추가분 → `dailyFileSink(logDir, port, clock): {sink: Sink, currentPath: () => string}`, `ensureLogDir(logDir): boolean`
+- Produces: `AdminOptions` 추가분 → `broadcaster: LogBroadcaster | null`, `logFile: () => string | null`, `shouldStop: () => boolean`
+- Produces: `ServeOptions` 추가분 → `broadcaster`, `logDir`, `logFile`, `logMaxAgeSeconds`
+
+- [ ] **Step 1: `logStream.ts` 를 쓴다**
 
 ```ts
 /**
@@ -2688,7 +2869,7 @@ export class LogBroadcaster {
 }
 ```
 
-- [ ] **Step 6: `logging.ts` 에 일별 파일 sink 를 더한다**
+- [ ] **Step 2: `logging.ts` 에 일별 파일 sink 를 더한다**
 
 `logging.ts` 끝에 더한다:
 
@@ -2744,7 +2925,7 @@ export function ensureLogDir(logDir: string): boolean {
 
 `Sink` 타입을 `export type Sink = (line: string) => void;` 로 바꿔 외부에서 쓸 수 있게 한다.
 
-- [ ] **Step 7: `admin.ts` 에 로그 라우트를 더한다**
+- [ ] **Step 3: `admin.ts` 에 로그 라우트를 더한다**
 
 `AdminOptions` 에 `broadcaster: LogBroadcaster | null`, `logFile: () => string | null`, `shouldStop: () => boolean` 을 더하고, `/api/status` 의 `log_dir` / `log_file` 을 실제 값으로 채운다:
 
@@ -2840,7 +3021,7 @@ new EventSource('/api/logs/stream').onmessage = (event) => {
 
 파이썬 쪽 `_PAGE` 는 `str.format()` 을 쓰느라 CSS·JS 의 중괄호가 전부 이중이지만, TS 템플릿 리터럴에는 그 제약이 없다. `${` 만 escape 하면 된다.
 
-- [ ] **Step 8: `main.ts` 와 `app.ts` 를 배선한다**
+- [ ] **Step 4: `main.ts` 와 `app.ts` 를 배선한다**
 
 `main.ts` 상단의 import 를 아래로 바꾼다:
 
@@ -2855,7 +3036,7 @@ import { resolveLogDir } from './logPaths.js';
 import { LogBroadcaster } from './logStream.js';
 ```
 
-Task 2 에서 쓴 `configureLogging({ clock, sinks: [...] })` 호출을 아래로 **대체한다**:
+Task 4 에서 쓴 `configureLogging({ clock, sinks: [...] })` 호출을 아래로 **대체한다**:
 
 ```ts
   const { dir: logDir, warnings } = resolveLogDir({
@@ -2939,11 +3120,32 @@ export interface ServeOptions {
   purgeTimer.unref();
 ```
 
-`close` 에 `clearInterval(purgeTimer)` 를 더하고, `buildAdminApp` 호출에 `broadcaster`, `logFile: options.logFile`, `shouldStop: () => shuttingDown` 을 넘긴다. `shuttingDown` 은 `serve()` 안의 `let shuttingDown = false;` 이고 `close` 가 맨 먼저 `true` 로 만든다 — 그래야 SSE 제너레이터가 스스로 끝나고 종료가 열린 연결에 막히지 않는다.
+`close` 에 `clearInterval(purgeTimer)` 를 더하고, `buildAdminApp` 호출에 `broadcaster`, `logFile: options.logFile`, `shouldStop: () => shuttingDown` 을 넘긴다. `shuttingDown` 은 `serve()` 안의 `let shuttingDown = false;` 이고 `close` 가 맨 먼저 `true` 로 만든다 — 그래야 SSE 루프가 스스로 끝나고 종료가 열린 연결에 막히지 않는다.
+
+**그리고 `close()` 를 실제로 부르는 곳을 만든다.** `main.ts` 에 신호 핸들러를 단다:
+
+```ts
+  const handle = await serve({ /* ... */ });
+
+  // 이것이 없으면 shouldStop 이 영원히 false 다. 노드의 기본 신호 처리는
+  // 즉시 프로세스를 끝내므로 매달리지는 않지만, 그러면 close() 안의 정리
+  // (purge 타이머, 열린 SSE 응답)가 한 번도 돌지 않고 shouldStop 은
+  // 아무도 당기지 않는 배관이 된다.
+  //
+  // 적합성 스위트의 픽스처가 SIGTERM 을 보내므로 이 경로는 매 테스트마다
+  // 실제로 돈다.
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    process.once(signal, () => {
+      void handle.close().then(() => process.exit(0));
+    });
+  }
+```
+
+`serve()` 의 반환 타입에 `close` 가 이미 있으므로 시그니처 변경은 없다.
 
 `app.ts` 상단에 `import { purgeLogs } from './logPaths.js';` 와 `import type { LogBroadcaster } from './logStream.js';` 를 더한다.
 
-- [ ] **Step 9: 빌드하고 노드 타깃을 돌린다**
+- [ ] **Step 5: 빌드하고 노드 타깃을 돌린다**
 
 Run:
 ```bash
@@ -2953,7 +3155,7 @@ uv run --directory plugins/mcp-test/conformance pytest -v --target=node
 ```
 Expected: 32 passed
 
-- [ ] **Step 10: SSE 접근 로그 테스트가 진짜로 지키는지 확인한다**
+- [ ] **Step 6: SSE 접근 로그 테스트가 진짜로 지키는지 확인한다**
 
 `access.ts` 의 `res.writeHead` 후킹을 `res.on('finish', ...)` 로 잠깐 바꾸고 빌드한 뒤 스위트를 돌린다.
 
@@ -2961,12 +3163,12 @@ Expected: `test_access_log_records_the_sse_connection_immediately` 가 **FAIL**
 
 이것이 이 프로젝트에서 가장 놓치기 쉬운 함정이므로 반드시 눈으로 확인한다. 되돌린다.
 
-- [ ] **Step 11: 파이썬 회귀를 본다**
+- [ ] **Step 7: 파이썬 회귀를 본다**
 
 Run: `uv run --directory plugins/mcp-test/conformance pytest -q --target=python`
 Expected: 32 passed
 
-- [ ] **Step 12: 커밋**
+- [ ] **Step 8: 커밋**
 
 ```bash
 git add plugins/mcp-test/server-node
@@ -2975,7 +3177,7 @@ git commit -m "feat(node): 로그 파일과 SSE 스트림"
 
 ---
 
-## Task 9: 커맨드, 훅, 문서
+## Task 12: 커맨드, 훅, 문서
 
 **Files:**
 - Modify: `plugins/mcp-test/commands/server-start.md`
@@ -3125,6 +3327,6 @@ git commit -m "docs: 두 런타임을 고르는 절차와 개발 명령"
 - [ ] `--target=python` 과 `--target=node` 가 **같은 개수의 테스트를 통과**한다. 하나라도 skip 이면 완료가 아니다.
 - [ ] `server-node/dist/` 를 지우고 스위트를 돌려도 통과한다 (픽스처가 빌드를 강제하는지 확인).
 - [ ] `server-node/node_modules/` 를 지우고 `--target=node` 를 돌리면 **명확한 오류**로 멈춘다 (skip 이 아니다).
-- [ ] Task 4·6·8 의 "진짜로 지키는지 확인한다" 스텝 셋을 **실제로 깨 보고** 되돌렸다.
+- [ ] Task 6·8·11 의 "진짜로 지키는지 확인한다" 스텝 셋을 **실제로 깨 보고** 되돌렸다.
 - [ ] `/mcp-test:server-start` 를 인자 없이 부르면 되묻는다.
 - [ ] 두 런타임을 번갈아 띄우고 같은 Claude Code 세션에서 `ping` 이 동작한다 (`.mcp.json` 변경 없이).
