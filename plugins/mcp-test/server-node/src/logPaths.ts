@@ -46,6 +46,13 @@ function clean(value: string): string {
   return resolve(expanded);
 }
 
+/**
+ * Claude Code 사용자 설정에서 log_dir 을 읽는다.
+ *
+ * 비민감 userConfig 값은 Claude Code 가 pluginConfigs[<plugin-id>].options 에
+ * 직접 쓴다 (docs/claude-base/settings.md 의 `pluginConfigs` 절, 816-834행).
+ * 그래서 이 함수는 중계 파일도 훅도 거치지 않고 settings.json 을 바로 연다.
+ */
 function fromSettings(settingsPath: string): { dir: string | null; warnings: string[] } {
   let raw: string;
   try {
@@ -112,6 +119,19 @@ export function logFileName(port: number, day: Date): string {
   return `mcp-test-server.${port}.${iso}.log`;
 }
 
+/**
+ * MAX_AGE_SECONDS(기본 72시간)보다 오래된 로그 파일을 지운다. 지운 개수와
+ * 경고를 돌려준다.
+ *
+ * LOG_PATTERN 에 맞는 파일만, 비재귀로 본다. log_dir 은 사용자가 지정할 수
+ * 있으므로 무관한 파일을 지워서는 안 된다 — 홈 디렉토리를 가리켜도
+ * 안전해야 한다.
+ *
+ * `keep` 은 지금 이 프로세스가 쓰고 있는 로그 파일의 경로를 받는다. 이
+ * 함수는 기동 시점의 청소(오늘자 파일을 열기 전)에도, 파일이 열린 뒤의
+ * 정기 청소에도 같이 쓰인다 — `keep` 없이 후자에서 호출하면 지금 쓰고
+ * 있는 파일 자체가 오래됐다는 이유로 지워질 수 있다.
+ */
 export function purgeLogs(
   logDir: string,
   now: Date,
