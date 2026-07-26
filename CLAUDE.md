@@ -1,5 +1,16 @@
 # basic-mcp-py-server
 
+## 두 런타임 중 기준은 파이썬이다
+
+`plugins/mcp-test/server/`(파이썬)와 `plugins/mcp-test/server-node/`(노드)는
+같은 MCP 테스트 서버를 두 번 구현한 것이다. **동작이 갈리면 파이썬이 맞는
+쪽이고, 노드를 고친다.** 두 서버가 실제로 같은지는
+`plugins/mcp-test/conformance/`가 강제하지만, 그 스위트가 계약하는 범위는
+설계 문서(`docs/superpowers/specs/2026-07-26-nodejs-server-design.md`) §3.1
+이고 **계약하지 않는 것은 §3.2 에 적혀 있다.** 파이썬 쪽을 바꿨다면 §3.1
+표를 보고 노드에도 반영해야 한다 — 스위트가 잡는 범위 밖에서 먼저
+갈라진다.
+
 ## MCP 지식의 출처 (docs/claude-base/)
 
 Claude Code가 MCP를 어떻게 다루는지에 관한 판단은 **추측하거나 기억에 의존하지 말고 `docs/claude-base/`를 먼저 읽는다.** 이 디렉토리는 공식 문서의 미러이므로 근거로 인용할 수 있다.

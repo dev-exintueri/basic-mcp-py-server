@@ -22,7 +22,7 @@
 ```
 plugins/mcp-test/
 ├── .mcp.json              변경 없음
-├── .claude-plugin/        변경 없음
+├── .claude-plugin/        description 수정 (아래 참조)
 ├── commands/server-start.md   런타임 인자
 ├── hooks/check-server.sh      안내 문구
 ├── scripts/connection-id.sh   변경 없음
@@ -33,11 +33,20 @@ plugins/mcp-test/
 
 기존 `server/` 를 `servers/python/` 으로 옮기지 않는다. 이름의 대칭보다 기존 경로를 건드리지 않는 쪽을 택했다 — `server-start.md`, README 의 `uv run --directory`, 훅 경로가 전부 딸려 온다.
 
+**`.claude-plugin/` 는 "변경 없음" 이 아니었다(최종 리뷰 M-11).** `.claude-plugin/marketplace.json` 과 `plugins/mcp-test/.claude-plugin/plugin.json` 의 `description` 이 이 계획을 세울 당시 이미 "여러 Claude 세션이 하나의 파이썬 프로세스에 붙는 MCP 테스트 서버" 라고 파이썬을 못 박고 있었다. `/plugin` UI 와 마켓플레이스 목록에 그대로 보이는 문구라, 노드가 들어온 뒤에도 그대로 두면 README(이미 "파이썬 또는 Node.js" 로 고쳤다)와 어긋난다. 두 파일 모두 "하나의 서버 프로세스(파이썬 또는 Node.js)에" 로 고친다. `server/tests/test_marketplace.py` 와 `test_plugin_files.py` 가 이 파일들을 검증하므로 고친 뒤 반드시 돌린다.
+
 **툴체인:** TypeScript + express + vitest, 빌드는 `tsc` → `dist/`. MCP SDK 는 **v1.x 계열**(`@modelcontextprotocol/sdk`)을 쓴다. 2.0 은 `@modelcontextprotocol/server` + `/node` 로 분리됐지만 아직 `2.0.0-alpha.2` 이므로 예시 저장소에 넣지 않는다.
 
 ## 3. 패리티 계약
 
 "관찰 가능한 경계는 동일하다" 는 그대로 두면 거짓이다. 지킬 수 없는 항목이 있다. 계약의 실체는 아래 두 표이고, **적합성 스위트가 강제하는 것은 첫 번째 표뿐이다.**
+
+**구별될 때 누가 이기는가.** "밖에서 구별되지 않는다" 는 목표이지 자동으로
+성립하는 성질이 아니다 — 최종 리뷰가 §3.1 표 밖에서 갈리는 지점을 여섯 개
+더 찾아냈다(§3.2 끝부분). **파이썬 구현이 기준이다.** 두 런타임의 동작이
+갈리면 파이썬이 맞는 쪽이고 노드를 고친다. `README.md`와 `CLAUDE.md`에도
+같은 문장이 있다 — 포크해서 파이썬 쪽을 고치는 사람이 노드도 따라 고쳐야
+한다는 방향을 어딘가에서는 봐야 한다.
 
 ### 3.1 계약한다
 
@@ -53,6 +62,8 @@ plugins/mcp-test/
 | 접근 로그 시점 | 응답 **시작**. SSE 연결도 열리는 순간 `dur_ms≈0` 줄 하나를 남기고 갱신되지 않는다 |
 | 줄 이스케이프 | 조립이 끝난 한 줄에 캐리지 리턴과 줄바꿈을 한 번 건다 |
 | 응답 상태 | 401(빈 토큰) / 403(차단) / 404(모르는 연결 ID) / 303(HTML 폼 리다이렉트), 오류 응답의 `error` 키 존재 |
+| 오류 응답의 형태 | 모든 4xx/5xx 응답은 JSON `{error}` 이고 스택 트레이스나 서버 파일 경로를 포함하지 않는다(최종 리뷰 Important 2 — 오류 처리기가 없으면 이 계약이 12개 태스크 경계를 그대로 통과한다) |
+| 인증 대 본문 파싱의 순서 | 토큰 없는 요청은 본문을 읽기 전에 401 로 끝난다 — 토큰 없음 + 깨진 JSON, 토큰 없음 + 큰 본문 모두(최종 리뷰 Important 1) |
 | MCP 엔드포인트 | `/mcp` 의 POST·GET·DELETE |
 | 도구 | `ping` `echo` `whoami` `sessions` 의 이름, 필수 인자의 이름과 타입, 출력 키. **JSON Schema 전체를 비교하지 않는다** — FastMCP 와 TS SDK 가 내는 스키마는 `title` 같은 부수 필드에서 갈릴 수 있다 |
 | 기동 로그 | 기동 시 `app` 카테고리로 줄 하나. 문구는 계약하지 않는다 |
@@ -76,10 +87,40 @@ plugins/mcp-test/
 | 도구 실패 로그의 `error=` | 파이썬은 예외 **클래스 이름**을 적는다(`_logged`). 두 언어의 예외 이름이 같을 이유가 없다. WARN 레벨과 `tool=` `instance=` `dur_ms=` 까지만 본다 |
 | `settings.json` 의 `log_dir` 층 | 아래 참조 |
 | 접근 로그의 경로가 **디코드돼 있는지** | 아래 참조 |
+| 타임스탬프 문자열의 형식 | 아래 참조 (최종 리뷰가 지목, 직접 재측정) |
+| 접근 로그에 쿼리 문자열이 남는지 | 아래 참조 (최종 리뷰가 지목, 직접 재측정) |
+| `POST /api/status` 같은 메서드 불일치의 상태 코드 | 아래 참조 (최종 리뷰가 지목, 직접 재측정) |
 
 **경로 디코딩을 계약에서 뺀 이유.** ASGI 규격상 Starlette 의 `scope["path"]` 는 퍼센트 디코딩된 값이라, `%0d%0a` 를 보내면 파이썬은 **실제 캐리지 리턴**을 받아 `\r` 로 이스케이프해 남긴다. express 의 `req.originalUrl` 은 날것이라 노드는 `%0d%0a` 를 글자 그대로 남기고 이스케이프할 것이 없다.
 
 **지켜야 할 성질은 "제어 문자가 로그 파일에 날것으로 들어가지 않는다" 이고, 그것은 양쪽 다 지킨다.** 이스케이프된 흔적(`\r`)이 보이는지는 계약하지 않는다 — 그것까지 계약하면 노드를 통과시킬 수 없다.
+
+**타임스탬프 문자열의 형식.** `session_view` 의 `connected_at`/`last_seen`, `ping.server_time`, `/api/status`, `/fragments/sessions` 표에 그대로 나가는 값이다. 두 서버를 직접 띄워 같은 세션을 조회해 실측(2026-07-26):
+
+```
+파이썬 (datetime.isoformat()):  2026-07-26T15:00:20.691029+00:00
+노드   (Date.prototype.toISOString()): 2026-07-26T15:00:45.177Z
+```
+
+파이썬은 마이크로초 6자리 + 명시적 `+00:00` 오프셋, 노드는 밀리초 3자리 + `Z`. `session_view` 의 로그 줄 형식(§3.1, `%Y-%m-%dT%H:%M:%SZ`)과 헷갈리지 마라 — 그건 `logging.ts`/`logsetup.py` 가 만드는 별개의 문자열이고 이미 계약돼 있다. 여기서 계약하지 않는 것은 JSON 응답에 실리는 이 필드들의 형식이다.
+
+**접근 로그에 쿼리 문자열이 남는지.** `GET /api/status?foo=bar` 를 두 서버에 보내 로그 파일을 직접 읽어 실측(2026-07-26):
+
+```
+파이썬: GET /api/status 200 dur_ms=0
+노드:   GET /api/status?foo=bar&baz=1 200 dur_ms=1
+```
+
+노드 `access.ts` 는 `req.originalUrl` 을 쓰므로 쿼리가 남고, 파이썬 `access.py` 는 ASGI `scope["path"]` 를 쓰므로 쿼리가 없다(스킴 자체에 쿼리가 안 들어온다). 위 "경로 디코딩" 항목은 "퍼센트 인코딩이 풀려 있는지" 만 뺐을 뿐 쿼리 포함 여부는 말하지 않았으므로 따로 적는다.
+
+**메서드 불일치의 상태 코드.** 관리 라우트에 계약하지 않은 메서드로 보내면 실측(2026-07-26, `POST /api/status`):
+
+```
+파이썬(Starlette Route, 메서드 안 맞으면 405): 405
+노드(express, 매칭되는 라우트가 없으면 404):    404
+```
+
+Starlette 의 `Route` 는 경로가 맞고 메서드가 안 맞으면 405 를 낸다. express 는 `app.get(...)` 으로만 등록했으므로 `POST` 는 그 라우트 자체가 안 보여 404 로 떨어진다. 상태 코드 자체는 M-6(이번 라운드에서 의도적으로 남긴 항목)이지만, 계약표에 없던 갈림이라 여기 적어 둔다.
 
 **카테고리 집합을 계약에서 뺀 이유.** 파이썬 서버를 실제로 띄워 로그를 받아 보면 우리 카테고리 넷 말고도 이런 줄이 섞인다.
 
@@ -155,6 +196,8 @@ pytest 로 쓴다. `server/tests/test_acceptance.py` 에 서버를 subprocess �
 **로그는 응답 완료가 아니라 시작에서 남긴다.** express 관용구인 `res.on('finish')` 는 여기서 틀렸다. `/api/logs/stream` 은 SSE 라 브라우저 탭이 닫힐 때까지 finish 하지 않으므로, 그 엔드포인트는 접근 로그가 한 줄도 남지 않는다. `res.writeHead` 를 감싸 첫 바이트에서 남긴다.
 
 **`express.json()` 은 POST 에만 건다.** GET(SSE 스트림)까지 걸면 transport 가 읽어야 할 스트림이 소진된다. MCP SDK 의 `handleRequest(req, res, body)` 는 POST 에서만 파싱된 본문을 받는다.
+
+**`express.json()` 은 인증 뒤에 등록한다.** express 의 기본 관용구(본문 파싱을 먼저 걸고 그 뒤에 인증)를 따르면, 토큰 없는 요청도 본문 파싱과 그 실패(깨진 JSON → 400, 100KB 넘는 본문 → 413, `express.json()` 의 기본 `limit` 이 100kb 다)를 먼저 겪는다. 파이썬은 `AuthMiddleware` 가 MCP 앱 **바깥**이라 본문을 보기도 전에 401을 낸다 — 토큰 없음 + 깨진 JSON, 토큰 없음 + 큰 본문 둘 다 401 이다(최종 리뷰 Important 1, 실측). `authMiddleware` 는 헤더만 읽고 본문에는 손대지 않으므로 인증을 먼저 등록해도 안전하다. `limit` 도 기본값(100kb)을 그대로 두면 안 된다 — 파이썬(starlette/uvicorn)에는 본문 크기 상한이 없다(실측: 100MB 까지 echo 왕복 성공). `echo` 는 계약한 도구이고 `text` 는 길이 제한 없는 인자이므로, 노드도 실질적으로 무제한(`limit: Infinity`)을 쓴다.
 
 **인자 없는 도구의 콜백은 `(extra)` 하나만 받는다.** SDK 의 `executeToolHandler` 는 `inputSchema` 유무로 갈린다 — 있으면 `(args, extra)`, 없으면 **`(extra)`**. 파이썬 FastMCP 는 `ctx: Context` 파라미터로 주입하므로 규약이 다르다. `ping` `whoami` `sessions` 는 인자가 없으므로 `(extra) => ...` 이고, 습관대로 `(_args, extra)` 라고 쓰면 `extra` 가 첫 인자에 들어가 **`whoami` 가 연결 ID 를 조용히 놓친다.** 오류는 나지 않는다.
 
