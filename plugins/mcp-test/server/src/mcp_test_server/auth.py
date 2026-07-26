@@ -10,6 +10,22 @@ sessions 도구가 모든 연결 ID를 모든 세션에 공개하므로, 비어 
 호출해 그 세션의 subject/project/label 을 덮어쓸 수 있다. 피해는 제한적이고
 (다음 요청에서 레코드가 다시 생긴다) 이 설계에 내재한 성질이므로 막지
 않는다. 다만 사실로 남겨 둔다.
+
+## 응용할 때
+
+**바꿔도 되는 것.** `read_identity()` 의 통과 조건이 이 서버의 인증
+전부다. 진짜 인증을 넣는다면 여기다 — 토큰을 대조하든 JWT 를 검증하든,
+`Identity` 를 돌려주거나 `None` 을 돌려주기만 하면 나머지는 그대로
+동작한다. 읽는 헤더 이름과 `UNKNOWN_INSTANCE` 같은 기본값도 바꿀 수 있다.
+
+**함께 바꿔야 하는 것.** 헤더 이름을 바꾸면 플러그인 쪽 `.mcp.json` 의
+`headers` 와 `scripts/connection-id.sh` 가 따라온다. `Identity` 에 필드를
+더하면 `registry` 의 `touch()` 도 따라온다.
+
+**깨면 안 되는 것.** `AUTH_SCOPE_KEY` 로 스코프에 넣는 딕셔너리의 키
+세 개는 `access` 와의 계약이다. 그리고 이 미들웨어는 순수 ASGI 여야
+한다 — `BaseHTTPMiddleware` 로 바꾸면 응답을 감싸게 되어 스트리밍
+응답과 얽힌다.
 """
 
 from __future__ import annotations

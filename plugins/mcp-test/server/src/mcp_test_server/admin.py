@@ -23,6 +23,22 @@
 serve()에서 ASGI 게이트로 감싸면 된다 — 그것이 가능하다는 것은
 tests/test_admin.py 의 test_admin_app_composes_under_an_auth_layer 가
 증명한다.
+
+## 응용할 때
+
+**바꿔도 되는 것.** `_PAGE` / `_SESSIONS` / `_ROW` 템플릿과 라우트 목록이
+관리 화면의 전부다. 폴링 주기(`_SESSION_POLL_MS`)와 하트비트 간격도
+여기 있다.
+
+**깨면 안 되는 것.**
+
+- 템플릿은 `str.format()` 으로 렌더한다. 그래서 CSS 와 자바스크립트의
+  중괄호가 전부 이중이다. 새 스타일이나 스크립트를 넣을 때 이걸 놓치면
+  `KeyError` 로 페이지가 통째로 500 이 된다.
+- 세션에서 온 값은 반드시 `html.escape()` 를 거쳐 넣는다. 그 값들은
+  클라이언트가 정한다.
+- `log_stream` 의 `should_stop()` 검사와 그 `return` 을 지우면 정상
+  종료마다 ERROR 트레이스백이 남는다. 아래 본문 주석에 이유가 있다.
 """
 
 from __future__ import annotations
