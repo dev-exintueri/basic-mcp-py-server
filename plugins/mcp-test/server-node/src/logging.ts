@@ -23,7 +23,15 @@
  *   부르지 않는다. configureLogging() 이전의 로그 호출은 아무 데도 나가지 않는다.
  * - sink 예외는 삼키되, stderr 로 오류를 알린다. 한 목적지의 실패가 나머지
  *   목적지에 영향을 주면 안 된다.
+ * - dailyFileSink() 의 쓰기 실패도 같은 이유로 삼킨다. 이 sink 는 접근 로그
+ *   미들웨어와 모든 도구 호출 안에서 돌므로, 디스크가 꽉 찼다고 요청 처리가
+ *   죽으면 안 된다.
  */
+
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+
+import { logFileName } from './logPaths.js';
 
 export type Clock = () => Date;
 export type Level = 'INFO' | 'WARN' | 'ERROR';
@@ -89,4 +97,47 @@ export function getLogger(category: string): Logger {
     warn: (m) => emit('WARN', m),
     error: (m) => emit('ERROR', m),
   };
+}
+
+/**
+ * 하루 한 파일. 날짜 경계는 주입된 시계로 판단한다.
+ *
+ * 쓰기 실패를 삼킨다. 로그 실패가 요청 처리를 통째로 죽이면 안 된다 —
+ * 이 sink 는 접근 로그 미들웨어와 모든 도구 호출 안에서 돈다.
+ */
+export function dailyFileSink(
+  logDir: string,
+  port: number,
+  clock: Clock,
+): { sink: Sink; currentPath: () => string } {
+  let day = clock().toISOString().slice(0, 10);
+  let path = join(logDir, logFileName(port, clock()));
+
+  return {
+    sink: (line: string) => {
+      const today = clock().toISOString().slice(0, 10);
+      if (today !== day) {
+        day = today;
+        path = join(logDir, logFileName(port, clock()));
+      }
+      try {
+        appendFileSync(path, line + '\n', 'utf8');
+      } catch {
+        // 삼킨다. 이유는 위 주석에 있다.
+      }
+    },
+    currentPath: () => path,
+  };
+}
+
+export function ensureLogDir(logDir: string): boolean {
+  try {
+    mkdirSync(logDir, { recursive: true });
+    return true;
+  } catch (error) {
+    process.stderr.write(
+      `경고: 로그 디렉토리 ${logDir} 를 쓸 수 없다 (${String(error)}). 파일 로깅 없이 계속한다.\n`,
+    );
+    return false;
+  }
 }

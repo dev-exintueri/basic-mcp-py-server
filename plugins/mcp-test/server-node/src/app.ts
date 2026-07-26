@@ -14,6 +14,9 @@
  *   바꿀 수 있는 통로를 만들지 않는다.
  * - createMcpExpressApp() 을 쓰지 않는다. 그 헬퍼는 Host 헤더 검증을
  *   자동으로 걸어 파이썬 서버와 동작이 갈린다.
+ * - serve() 의 close() 는 shuttingDown 을 가장 먼저 true 로 만든다.
+ *   /api/logs/stream 의 while 루프가 그 값을 폴링해 스스로 끝나야 하는데,
+ *   순서를 바꿔 서버부터 닫으면 열려 있는 SSE 응답이 종료를 막는다.
  *
  * **함께 바꿔야 하는 것.** isLoopback() 은 파이썬 app.py 의 is_loopback()
  * (표준 라이브러리 ipaddress.ip_address(...).is_loopback 판정)을 흉내
@@ -31,6 +34,8 @@ import { isIPv4, isIPv6 } from 'node:net';
 import { accessLog } from './access.js';
 import { authMiddleware } from './auth.js';
 import { getLogger, type Clock } from './logging.js';
+import { purgeLogs } from './logPaths.js';
+import type { LogBroadcaster } from './logStream.js';
 import { buildMcp } from './mcpServer.js';
 import { mcpRoute } from './mcpRoute.js';
 import { Registry } from './registry.js';
@@ -98,6 +103,10 @@ export interface ServeOptions {
   adminPort: number;
   staleAfter: number;
   clock: Clock;
+  broadcaster: LogBroadcaster | null;
+  logDir: string | null;
+  logFile: () => string | null;
+  logMaxAgeSeconds: number;
 }
 
 export function buildMcpApp(registry: Registry, startedAt: Date, clock: Clock): Express {
@@ -135,20 +144,54 @@ export async function serve(options: ServeOptions): Promise<{ close: () => Promi
     `서버 기동 MCP=${options.host}:${options.port} 관리=${ADMIN_HOST}:${options.adminPort}`,
   );
 
+  // close() 가 맨 먼저 이 값을 true 로 만든다. /api/logs/stream 의 루프가
+  // 이 값을 폴링해 스스로 끝나야, 열려 있는 SSE 응답이 종료를 막지 않는다.
+  let shuttingDown = false;
+
   const adminApp = buildAdminApp({
     registry,
     startedAt,
     clock: options.clock,
     mcpEndpoint: `http://${endpointHost(options.host)}:${options.port}/mcp`,
     runtime: 'node',
+    broadcaster: options.broadcaster,
+    logFile: options.logFile,
+    shouldStop: () => shuttingDown,
   });
   const adminServer = createServer(adminApp);
   await listen(adminServer, options.adminPort, ADMIN_HOST);
 
   process.stdout.write(`관리   http://${ADMIN_HOST}:${options.adminPort}/\n`);
 
+  if (options.logDir !== null) {
+    process.stdout.write(`로그   ${options.logFile()}\n`);
+    // 기동 직후 한 번 청소한다. 아래 주기 타이머는 10분 뒤에야 처음 돈다.
+    const { warnings } = purgeLogs(options.logDir, options.clock(), {
+      maxAgeSeconds: options.logMaxAgeSeconds,
+      keep: options.logFile(),
+    });
+    for (const message of warnings) logger.warn(message);
+  }
+
+  const purgeTimer = setInterval(() => {
+    const now = options.clock();
+    const purged = registry.purge(now);
+    if (purged > 0) getLogger('registry').info(`오래된 세션 ${purged}개를 정리했다`);
+    if (options.logDir === null) return;
+    const { removed, warnings } = purgeLogs(options.logDir, now, {
+      maxAgeSeconds: options.logMaxAgeSeconds,
+      keep: options.logFile(),
+    });
+    if (removed > 0) logger.info(`오래된 로그 ${removed}개를 지웠다`);
+    for (const message of warnings) logger.warn(message);
+  }, 600_000);
+  // 이 타이머가 이벤트 루프를 붙들면 프로세스가 종료되지 않는다.
+  purgeTimer.unref();
+
   return {
     close: async () => {
+      shuttingDown = true;
+      clearInterval(purgeTimer);
       await Promise.all([
         new Promise<void>((resolve) => mcpServer.close(() => resolve())),
         new Promise<void>((resolve) => adminServer.close(() => resolve())),

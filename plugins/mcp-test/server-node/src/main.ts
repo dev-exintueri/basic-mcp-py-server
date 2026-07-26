@@ -34,7 +34,11 @@ import { parseArgs as nodeParseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 import { DEFAULTS, serve } from './app.js';
-import { configureLogging, type Clock } from './logging.js';
+import {
+  configureLogging, dailyFileSink, ensureLogDir, getLogger, type Clock, type Sink,
+} from './logging.js';
+import { resolveLogDir } from './logPaths.js';
+import { LogBroadcaster } from './logStream.js';
 
 export interface Options {
   host: string;
@@ -117,18 +121,50 @@ async function main(): Promise<number> {
   }
 
   const clock: Clock = () => new Date();
-  configureLogging({
-    clock,
-    sinks: [(line) => process.stdout.write(line + '\n')],
+
+  const { dir: logDir, warnings } = resolveLogDir({
+    flag: options.logDir,
+    env: process.env['MCP_TEST_LOG_DIR'],
   });
 
-  await serve({
+  const broadcaster = new LogBroadcaster();
+  const sinks: Sink[] = [(line) => broadcaster.publish(line)];
+  let currentPath: (() => string) | null = null;
+
+  if (ensureLogDir(logDir)) {
+    const file = dailyFileSink(logDir, options.port, clock);
+    sinks.push(file.sink);
+    currentPath = file.currentPath;
+  }
+  configureLogging({ clock, sinks });
+
+  // 경로를 정하는 동안에는 남길 곳이 없었다. 준비된 뒤에 남긴다.
+  for (const message of warnings) getLogger('app').warn(message);
+
+  const handle = await serve({
     host: options.host,
     port: options.port,
     adminPort: options.adminPort,
     staleAfter: options.staleAfter,
     clock,
+    broadcaster,
+    logDir: currentPath === null ? null : logDir,
+    logFile: () => (currentPath === null ? null : currentPath()),
+    logMaxAgeSeconds: options.logRetentionDays * 86400,
   });
+
+  // 이것이 없으면 shouldStop 이 영원히 false 다. 노드의 기본 신호 처리는
+  // 즉시 프로세스를 끝내므로 매달리지는 않지만, 그러면 close() 안의 정리
+  // (purge 타이머, 열린 SSE 응답)가 한 번도 돌지 않고 shouldStop 은
+  // 아무도 당기지 않는 배관이 된다.
+  //
+  // 적합성 스위트의 픽스처가 SIGTERM 을 보내므로 이 경로는 매 테스트마다
+  // 실제로 돈다.
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    process.once(signal, () => {
+      void handle.close().then(() => process.exit(0));
+    });
+  }
   return 0;
 }
 

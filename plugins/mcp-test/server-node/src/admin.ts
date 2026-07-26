@@ -16,17 +16,29 @@
  * **바꿔도 되는 것.** HTML 템플릿과 라우트 목록. 폴링 주기도 여기 있다.
  *
  * **함께 바꿔야 하는 것.** 표의 열을 바꾸면 conformance 스위트의
- * test_sessions_fragment_has_the_contracted_columns 가 따라온다.
+ * test_sessions_fragment_has_the_contracted_columns 가 따라온다. 로그 줄
+ * 형식을 바꾸면 logging.ts 의 formatLine() 과 logPaths.ts 의 tailLines() 를
+ * 함께 본다.
  *
- * **깨면 안 되는 것.** 세션에서 온 값은 반드시 escapeHtml() 을 거쳐 넣는다.
- * 그 값들은 클라이언트가 정한다.
+ * **깨면 안 되는 것.**
+ * - 세션에서 온 값은 반드시 escapeHtml() 을 거쳐 넣는다. 그 값들은
+ *   클라이언트가 정한다.
+ * - `/api/status` 는 정확히 8개 키를 낸다. conformance 스위트의
+ *   test_status_has_the_contracted_keys 가 `set(payload)` 를 그 여덟 개와
+ *   비교한다. 필드를 늘리거나 줄이면 실패한다.
+ * - `/api/logs/stream` 의 while 루프는 `shouldStop()` 이 참이 되면 스스로
+ *   끝난다. 지우면 SSE 연결이 서버 종료를 막아, close() 가 열린 응답이
+ *   끝나기를 무한정 기다리게 된다.
  */
 
 import express from 'express';
 import type { Express, Request, Response } from 'express';
+import { dirname } from 'node:path';
 
 import { accessLog } from './access.js';
 import { getLogger, type Clock } from './logging.js';
+import { tailLines } from './logPaths.js';
+import type { LogBroadcaster } from './logStream.js';
 import { Registry, sessionView } from './registry.js';
 
 const registryLogger = getLogger('registry');
@@ -51,10 +63,14 @@ export interface AdminOptions {
   clock: Clock;
   mcpEndpoint: string;
   runtime: string;
+  broadcaster: LogBroadcaster | null;
+  logFile: () => string | null;
+  shouldStop: () => boolean;
 }
 
 export function buildAdminApp(options: AdminOptions): Express {
-  const { registry, startedAt, clock, mcpEndpoint, runtime } = options;
+  const { registry, startedAt, clock, mcpEndpoint, runtime, broadcaster, logFile, shouldStop } =
+    options;
 
   const snapshot = (): { now: Date; views: Record<string, unknown>[] } => {
     const now = clock();
@@ -100,6 +116,7 @@ ${rows}
 
   app.get('/api/status', (_req: Request, res: Response) => {
     const { now, views } = snapshot();
+    const path = logFile();
     res.json({
       pid: process.pid,
       runtime,
@@ -107,8 +124,8 @@ ${rows}
       mcp_endpoint: mcpEndpoint,
       session_count: views.length,
       sessions: views,
-      log_dir: null,
-      log_file: null,
+      log_dir: path === null ? null : dirname(path),
+      log_file: path,
     });
   });
 
@@ -117,6 +134,11 @@ ${rows}
   });
 
   app.get('/', (_req: Request, res: Response) => {
+    const path = logFile();
+    const note = path === null
+      ? '파일 로깅이 꺼져 있다. 아래는 이 연결 이후의 로그만 보여준다.'
+      : `${escapeHtml(path)} · 최근 200줄`;
+    const backfill = path === null ? '' : escapeHtml(tailLines(path).join('\n'));
     res.type('html').send(`<!doctype html>
 <html lang="ko">
 <head>
@@ -137,8 +159,8 @@ th, td { border: 1px solid #ccc; padding: .4rem .6rem; text-align: left; }
 <h1>MCP 테스트 서버</h1>
 <div id="sessions">${sessionsHtml()}</div>
 <h2>로그</h2>
-<p class="note">파일 로깅이 아직 붙지 않았다.</p>
-<pre id="log"></pre>
+<p class="note">${note}</p>
+<pre id="log">${backfill}</pre>
 <script>
 setInterval(async () => {
   try {
@@ -146,9 +168,72 @@ setInterval(async () => {
     document.getElementById('sessions').innerHTML = html;
   } catch (e) { /* 서버가 잠깐 없을 수 있다. 다음 주기에 다시 시도한다. */ }
 }, ${SESSION_POLL_MS});
+
+const box = document.getElementById('log');
+box.scrollTop = box.scrollHeight;
+new EventSource('/api/logs/stream').onmessage = (event) => {
+  // 맨 아래를 보고 있을 때만 따라간다. 위로 올려 읽는 중이면 방해하지 않는다.
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  box.textContent += event.data + '\\n';
+  if (atBottom) box.scrollTop = box.scrollHeight;
+};
 </script>
 </body>
 </html>`);
+  });
+
+  app.get('/api/logs/stream', async (req: Request, res: Response) => {
+    if (broadcaster === null) {
+      res.status(503).json({ error: '로그 스트림이 꺼져 있다' });
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    });
+    // writeHead() 는 헤더를 소켓에 바로 내보내지 않는다 — 노드는 첫 write()
+    // 나 end() 가 있을 때까지 미룬다. 이 라우트는 실제 로그 줄이 생길 때까지
+    // 아무것도 쓰지 않을 수 있으므로, flushHeaders() 없이는 클라이언트가
+    // 응답 상태 코드조차 받지 못한 채 오래 멈춘다(파이썬 StreamingResponse
+    // 는 ASGI http.response.start 메시지를 시작하자마자 보낸다). 실측:
+    // 이 줄이 없으면 conformance 의 test_log_stream_emits_new_lines 와
+    // test_access_log_records_the_sse_connection_immediately 가 ReadTimeout
+    // 으로 실패한다.
+    res.flushHeaders();
+
+    const subscriber = broadcaster.subscribe();
+    let closed = false;
+    req.on('close', () => {
+      closed = true;
+    });
+
+    try {
+      let idle = 0;
+      while (!closed && !shouldStop()) {
+        // 1초씩 깨어나는 이유는 하트비트가 아니라 종료다. 15초를 통째로
+        // 기다리면 그 사이에 시작된 종료를 최대 15초 동안 못 본다.
+        const lines = await subscriber.drain(1000);
+        if (lines.length === 0) {
+          idle += 1;
+          if (idle >= 15) {
+            idle = 0;
+            res.write(': ping\n\n'); // 유휴 연결이 끊기지 않게 하는 주석 하트비트
+          }
+          continue;
+        }
+        idle = 0;
+        for (const line of lines) {
+          // 트레이스백은 여러 줄이다. 줄마다 data: 를 붙이지 않으면 SSE
+          // 프레이밍이 깨진다.
+          const payload = line.split('\n').map((part) => `data: ${part}\n`).join('');
+          res.write(payload + '\n');
+        }
+      }
+    } finally {
+      broadcaster.unsubscribe(subscriber);
+      res.end();
+    }
   });
 
   /** block 과 unblock 라우트를 같은 코드로 만든다. */

@@ -57,7 +57,18 @@ export function accessLog(): RequestHandler {
     // 첫 바이트에서 남기기 위해 writeHead 를 감싼다. 자세한 이유는 위
     // 모듈 주석에 있다.
     res.writeHead = function patched(this: Response, ...args: unknown[]) {
-      write(res.statusCode);
+      // res.writeHead(status, ...) 를 직접 부르는 경로(예: SSE 라우트)에서는
+      // 이 시점의 res.statusCode 가 아직 새 값으로 갱신되지 않았다 —
+      // 노드의 ServerResponse.writeHead() 는 `this.statusCode = statusCode`
+      // 를 자기 본문 **안에서** 실행하므로, 원래 writeHead 를 부르기 전에
+      // res.statusCode 를 읽으면 그 전 값(기본 200)이 찍힌다. 지금까지는
+      // 기본값이 우연히 200이라 눈에 안 띄었지만, res.writeHead(201, ...) 로
+      // 실측하면 이 줄 없이는 "GET /probe 200"이 찍힌다 — 실제 응답은 201
+      // 인데도. 첫 인자가 숫자면 그것을 쓰고, 아니면 res.statusCode 로
+      // 떨어진다. 파이썬 access.py 가 ASGI send 의 message["status"] 를
+      // 읽어 권위 있는 값을 얻는 것과 같은 결과를 만든다.
+      const status = typeof args[0] === 'number' ? args[0] : res.statusCode;
+      write(status);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return (originalWriteHead as any)(...args);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

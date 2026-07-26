@@ -12,6 +12,14 @@
  * 연결 ID 를 조용히 놓친다. 오류는 나지 않는다.
  *
  * 헤더는 extra.requestInfo.headers 에서 **소문자 키**로 읽는다.
+ *
+ * **함께 바꿔야 하는 것.** logged() 의 두 번째 인자로 extra 를 넘길지는
+ * 파이썬 mcp_server.py 의 함수 시그니처가 정한다 — ctx: Context 를 받는
+ * 도구(whoami)만 실제 연결 ID 를 로그에 남기고, 나머지(ping, echo,
+ * sessions)는 ctx 가 없어 항상 instance=unknown 이다(Task 11, conformance 의
+ * test_tool_call_without_ctx_logs_unknown_instance 가 실측). 새 도구를
+ * 더하거나 기존 도구에 ctx 상당의 인자를 붙일 때 이 표를 먼저 본다 —
+ * extra 가 손에 있다고 무조건 넘기면 파이썬과 갈린다.
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -70,8 +78,13 @@ export function buildMcp(registry: Registry, startedAt: Date, clock: Clock): Mcp
       description:
         '서버 프로세스 정보를 반환한다. 여러 세션이 같은 pid를 보면 한 프로세스를 공유하는 것이다.',
     },
-    (extra) =>
-      logged('ping', extra as Extra, () => {
+    // extra 를 logged() 에 넘기지 않는다. 파이썬 ping() 은 ctx: Context 를
+    // 받지 않으므로 _logged 의 kwargs.get("ctx") 가 항상 None 이라 로그의
+    // instance 는 항상 unknown 이다 — extra 가 실제로 손에 있어도 안 쓰는
+    // 것이 노드와 파이썬을 같게 만든다(conformance 의
+    // test_tool_call_without_ctx_logs_unknown_instance 가 실측).
+    () =>
+      logged('ping', undefined, () => {
         const now = clock();
         return textResult({
           pid: process.pid,
@@ -85,8 +98,10 @@ export function buildMcp(registry: Registry, startedAt: Date, clock: Clock): Mcp
   mcp.registerTool(
     'echo',
     { description: '받은 문자열을 그대로 돌려준다.', inputSchema: { text: z.string() } },
-    (args, extra) =>
-      logged('echo', extra as Extra, () => ({
+    // echo(text) 도 파이썬 쪽에 ctx 인자가 없다. 같은 이유로 extra 를
+    // 넘기지 않는다 — 위 ping 의 주석 참고.
+    (args) =>
+      logged('echo', undefined, () => ({
         content: [{ type: 'text' as const, text: args.text }],
       })),
   );
@@ -106,8 +121,9 @@ export function buildMcp(registry: Registry, startedAt: Date, clock: Clock): Mcp
   mcp.registerTool(
     'sessions',
     { description: '이 서버에 붙어 있는 모든 세션을 반환한다.' },
-    (extra) =>
-      logged('sessions', extra as Extra, () => {
+    // sessions() 도 파이썬 쪽에 ctx 인자가 없다. 위 ping 의 주석 참고.
+    () =>
+      logged('sessions', undefined, () => {
         const now = clock();
         return textResult({
           count: registry.all().length,

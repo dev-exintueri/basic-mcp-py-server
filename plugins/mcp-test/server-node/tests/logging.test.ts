@@ -1,5 +1,9 @@
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, afterEach, vi } from 'vitest';
-import { formatLine, getLogger, configureLogging, resetLogging } from '../src/logging.js';
+import { dailyFileSink, formatLine, getLogger, configureLogging, resetLogging } from '../src/logging.js';
+import { logFileName } from '../src/logPaths.js';
 
 const fixed = () => new Date('2026-07-26T01:35:36.789Z');
 
@@ -99,5 +103,31 @@ describe('getLogger', () => {
     } finally {
       stderrSpy.mockRestore();
     }
+  });
+});
+
+describe('dailyFileSink', () => {
+  it('날짜가 바뀌면 파일 경로를 다시 계산해 새 파일에 쓴다', () => {
+    // 이 테스트가 없으면 conformance 스위트도 여기를 못 잡는다 — 스위트는
+    // 서버 하나를 짧게 띄워 검증하므로 자정을 실제로 넘길 수 없다.
+    // dailyFileSink() 안의 `if (today !== day) { ... path = ... }` 를
+    // 지우면 이 테스트가 깨진다: 두 번째 줄이 첫 파일에 계속 쌓인다.
+    const dir = mkdtempSync(join(tmpdir(), 'daily-file-sink-'));
+    let now = new Date('2026-01-01T23:59:00Z');
+    const clock = () => now;
+    const { sink, currentPath } = dailyFileSink(dir, 9999, clock);
+
+    sink('day one line');
+    const day1Path = currentPath();
+    expect(day1Path).toBe(join(dir, logFileName(9999, now)));
+
+    now = new Date('2026-01-02T00:01:00Z');
+    sink('day two line');
+    const day2Path = currentPath();
+
+    expect(day2Path).not.toBe(day1Path);
+    expect(day2Path).toBe(join(dir, logFileName(9999, now)));
+    expect(readFileSync(day1Path, 'utf8')).toBe('day one line\n');
+    expect(readFileSync(day2Path, 'utf8')).toBe('day two line\n');
   });
 });
