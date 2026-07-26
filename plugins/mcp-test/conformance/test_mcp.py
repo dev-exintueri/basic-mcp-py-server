@@ -122,8 +122,9 @@ def test_echo_round_trips_a_body_larger_than_100kb(server) -> None:
     """echo 는 길이 제한 없는 인자다 — 100KB 를 넘는 문자열도 그대로 돌아온다.
 
     express.json() 의 기본 limit(100kb)을 그대로 두면 이 호출이 노드에서만
-    413 으로 실패한다(최종 리뷰 Important 1). 150KB 는 그 기본 limit 을
-    확실히 넘기는 크기다.
+    413 으로 실패한다(최종 리뷰 Important 1). 아래는 15만 자(한글이라
+    UTF-8 로는 한 글자에 3바이트 — 와이어에는 약 450KB)이므로 100KB 경계를
+    여유 있게 넘긴다.
     """
     text = "가" * 150_000
     result = asyncio.run(_call_tool(server.mcp_url, HEADERS, "echo", {"text": text}))

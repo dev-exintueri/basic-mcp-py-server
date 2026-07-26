@@ -101,9 +101,9 @@ describe('Registry', () => {
   });
 
   it('isStale() 은 staleAfter 를 쓴다', () => {
-    // registry.ts 의 isStale() 을 상수 false 로 바꾸면(리뷰 실측 변이)
-    // 이 두 단언이 모두 실패하지 않고 두 번째만 실패해야 하는데, 상수
-    // false 로 바꾸면 두 번째가 깨진다.
+    // registry.ts 의 isStale() 을 상수 false 로 바꾸면(리뷰 실측 변이),
+    // 첫 단언은 원래도 false 를 기대하므로 그대로 통과하고 두 번째
+    // 단언(true 를 기대)만 깨진다 — 재검토가 이 변이로 실제로 확인했다.
     const registry = new Registry(300.0);
     const record = touch(registry);
     expect(registry.isStale(record, new Date(T0.getTime() + 299_000))).toBe(false);
