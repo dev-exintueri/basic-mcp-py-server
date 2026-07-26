@@ -44,6 +44,92 @@ def test_blank_bearer_token_is_rejected(server) -> None:
     assert response.status_code == 401
 
 
+def test_unauthenticated_malformed_json_body_is_rejected_with_401(server) -> None:
+    """토큰 없이 깨진 JSON 을 보내도 본문 파싱보다 인증이 먼저 돈다.
+
+    최종 리뷰 Important 1(노드 server-node/src/app.ts 의 buildMcpApp())이
+    실측한 갈림이다: express.json() 이 authMiddleware() 보다 먼저 등록돼
+    있으면 이 요청이 400(JSON 파싱 실패)으로 끝나 버린다. 파이썬은
+    AuthMiddleware 가 MCP 앱 바깥이라 본문을 보기도 전에 401을 낸다 — 이
+    단언이 지키는 프로덕션 줄은 그 등록 순서 자체다.
+    """
+    response = httpx.post(
+        server.mcp_url,
+        headers={"Content-Type": "application/json"},
+        content=b"{not valid json",
+        timeout=5,
+    )
+    assert response.status_code == 401
+    assert "error" in response.json()
+
+
+def test_unauthenticated_oversized_body_is_rejected_with_401(server) -> None:
+    """토큰 없이 100KB 를 넘는 본문을 보내도 크기 검사보다 인증이 먼저 돈다.
+
+    express.json() 의 기본 limit(100kb)이 authMiddleware() 보다 먼저 돌면
+    이 요청은 413(Payload Too Large)으로 끝난다. 본문은 200KB — 기본
+    limit 을 확실히 넘기되 이 서버가 실제로 검증한 무제한 상한(측정:
+    100MB 까지 echo 왕복 성공, app.ts 의 buildMcpApp() 주석 참고)에는 한참
+    못 미치는 크기다.
+    """
+    response = httpx.post(
+        server.mcp_url,
+        headers={"Content-Type": "application/json"},
+        content=b"x" * 200_000,
+        timeout=5,
+    )
+    assert response.status_code == 401
+    assert "error" in response.json()
+
+
+# 서버 소스의 절대 경로나 의존성의 파일·행 번호가 새어 나가는지 보는 단서.
+# 최종 리뷰 Important 2 가 실측한 경로다 — 노드가 오류 처리기 없이 깨진
+# JSON 을 받으면 body-parser 의 스택 트레이스가 담긴 HTML 을 그대로
+# 돌려줬다(파일 경로와 행 번호 포함).
+_PATH_LEAK_MARKERS = ("/Users/", "node_modules", "site-packages", ".ts:", ".js:", ".py:")
+
+
+def test_error_responses_are_json_with_an_error_key_and_no_server_paths(server) -> None:
+    """오류 응답은 JSON {error} 이고 서버 소스의 경로를 흘리지 않는다.
+
+    토큰이 있어도 본문이 깨져 있으면 오류가 난다 — 그 오류가 app.ts 의
+    errorHandler(노드) / AuthMiddleware 뒤의 MCP 앱(파이썬) 양쪽 모두를
+    거쳐 나가는 응답을 본다. 노드는 오류 처리기가 없으면 finalhandler 가
+    body-parser 의 스택을 그대로 HTML `<pre>` 에 박아 냈다(실측, 최종
+    리뷰 Important 2) — errorHandler.ts 의 res.status(status).json({error})
+    가 지키는 계약이 이 단언이다.
+    """
+    response = httpx.post(
+        server.mcp_url,
+        headers={
+            "Authorization": "Bearer alice",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        },
+        content=b"{not valid json",
+        timeout=5,
+    )
+    assert response.status_code >= 400
+    assert response.headers["content-type"].startswith("application/json")
+    payload = response.json()
+    assert "error" in payload
+    body_text = response.text
+    for marker in _PATH_LEAK_MARKERS:
+        assert marker not in body_text, f"{marker!r} 가 오류 응답에 그대로 새어 나갔다: {body_text}"
+
+
+def test_echo_round_trips_a_body_larger_than_100kb(server) -> None:
+    """echo 는 길이 제한 없는 인자다 — 100KB 를 넘는 문자열도 그대로 돌아온다.
+
+    express.json() 의 기본 limit(100kb)을 그대로 두면 이 호출이 노드에서만
+    413 으로 실패한다(최종 리뷰 Important 1). 150KB 는 그 기본 limit 을
+    확실히 넘기는 크기다.
+    """
+    text = "가" * 150_000
+    result = asyncio.run(_call_tool(server.mcp_url, HEADERS, "echo", {"text": text}))
+    assert result.content[0].text == text
+
+
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
