@@ -163,8 +163,15 @@ export function tailLines(
     const buffer = Buffer.alloc(length);
     readSync(fd, buffer, 0, length, start);
     let text = buffer.toString('utf8');
-    // 잘린 첫 줄은 반쪽이라 버린다.
-    if (size > maxBytes) text = text.slice(text.indexOf('\n') + 1);
+    // 잘린 첫 줄은 반쪽이라 버린다. 읽어온 범위에 개행이 아예 없으면
+    // (마지막 줄 하나가 maxBytes 를 통째로 넘는 경우) 그 반쪽 전체를
+    // 버린다 — indexOf 가 -1 일 때 +1 로 0 을 만들어 버리면 자른 텍스트를
+    // 그대로 남기게 되어, 파이썬 str.partition() 의 결과(빈 문자열)와
+    // 달라진다.
+    if (size > maxBytes) {
+      const cut = text.indexOf('\n');
+      text = cut === -1 ? '' : text.slice(cut + 1);
+    }
     return text.split('\n').filter((l) => l !== '').slice(-wanted);
   } catch {
     return [];
