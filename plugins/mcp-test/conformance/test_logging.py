@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+import urllib.parse
 
 import httpx
 from mcp import ClientSession
@@ -117,7 +118,27 @@ def test_control_characters_in_the_path_cannot_forge_a_log_line(server) -> None:
     있고(위조), 캐리지 리턴은 그보다 나쁘다 — SSE 프레이밍은 줄바꿈만
     나누므로 캐리지 리턴이 든 줄은 관리 화면에서 통째로 사라진다(은폐).
     """
-    httpx.request("POST", f"{server.admin_url}/api/status%0d%0aFORGED", timeout=5)
+    # 진짜 로그 줄 모양(스탬프 + INFO(5칸) + app(8칸) + 메시지)을 그대로
+    # 흉내 낸다. logsetup.py 의 ClockFormatter.format() 과 같은 형식이다:
+    # f"{stamp} {level:<5} {category:<8} {record.getMessage()}". 그냥
+    # "FORGED" 처럼 아무 문자열이나 넣으면 LINE 정규식이 매치하지 않아
+    # forged 리스트가 정상 상태·변이 상태 모두에서 항상 [] 가 되고, 이
+    # 단언은 절대 깨지지 않는다(실측: 리뷰에서 지적됨 — 아래 "검증" 참고).
+    fake_line = f"2026-01-01T00:00:00Z {'INFO':<5} {'app':<8} FORGED"
+    forged_match = LINE.match(fake_line)
+    assert forged_match and forged_match.group("category") == "app", fake_line
+
+    payload = "\r\n" + fake_line
+    forged_url = f"{server.admin_url}/api/status{urllib.parse.quote(payload, safe='')}"
+    httpx.request("POST", forged_url, timeout=5)
+
+    # 로그가 아예 없으면(예: 노드가 아직 파일 로깅을 안 하는 경우)
+    # log_text() 가 빈 문자열을 돌려주고 아래 두 단언이 그 빈 문자열을
+    # 상대로 공허하게 통과해 버린다(실측: 리뷰에서 지적됨 — 노드 RED 에서
+    # 이 테스트만 PASSED 로 찍혔던 이유). 요청이 실제로 접근 로그에
+    # 남았다는 것부터 확인한다.
+    wait_for(server, "http", r"POST /api/status")
+
     text = server.log_text()
     # splitlines() 로 쪼갠 뒤에 검사하지 않는다. 파이썬의 splitlines() 는
     # 캐리지 리턴에서도 쪼개므로 어떤 원소에도 그것이 남지 않고, 단언이
@@ -131,6 +152,27 @@ def test_control_characters_in_the_path_cannot_forge_a_log_line(server) -> None:
         and not m.group("message").startswith("POST ")
     ]
     assert forged == [], f"위조된 줄이 생겼다: {forged}"
+
+
+def test_tool_call_without_ctx_logs_unknown_instance(server) -> None:
+    """ctx 를 받지 않는 도구(ping)의 호출 로그도 계약이다.
+
+    mcp_server.py 의 `_logged` 는 `kwargs.get("ctx")` 로만 연결 ID를 얻는다.
+    `ping()` 은 `ctx: Context` 인자가 없으므로 이 분기가 걸리지 않고 항상
+    `instance=unknown` 으로 남는다 — 실측값을 그대로 옮겼다(지어내지 않음):
+    'tool=ping instance=unknown dur_ms=0 ok'. Task 11 이 노드의 로깅
+    래퍼를 만들 때 이 값이 파이썬과 달라지면 이 테스트가 잡아야 한다.
+    """
+    async def run():
+        async with streamablehttp_client(server.mcp_url, headers=HEADERS) as (r, w, _):
+            async with ClientSession(r, w) as session:
+                await session.initialize()
+                await session.call_tool("ping", {})
+
+    asyncio.run(run())
+    message = wait_for(server, "call", r"tool=ping")
+    assert "instance=unknown" in message
+    assert message.endswith(" ok")
 
 
 def test_status_reports_the_log_file(server) -> None:
