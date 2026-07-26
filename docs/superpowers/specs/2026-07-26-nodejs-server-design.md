@@ -45,7 +45,7 @@ plugins/mcp-test/
 |---|---|
 | 로그 타임스탬프 | `%Y-%m-%dT%H:%M:%SZ`. 밀리초 없음 — Node 의 `toISOString()` 은 `.789Z` 를 붙이므로 잘라내야 한다 |
 | 레벨·카테고리 폭 | `{레벨:<5} {카테고리:<8}` 좌측 정렬. `WARNING`→`WARN`, `CRITICAL`→`ERROR` |
-| 카테고리 집합 | `http`, `call`, `registry`, `app` 네 개 |
+| 우리 카테고리 | `http`, `call`, `registry`, `app` 이 **존재하고** 아래 형식을 지킨다. 이 넷이 카테고리의 전부라는 뜻은 아니다 — §3.2 참조 |
 | 토큰 마스킹 | 앞 두 글자 + `…`(U+2026, 마침표 세 개가 아니다) + `(sha256:앞8자리)` |
 | 접근 로그 필드 (`http`) | `<메서드> <경로> <상태> dur_ms=N`, 있을 때만 `instance=` `subject=` `reason=`. 400 이상은 WARN |
 | 도구 호출 로그 (`call`) | 성공 `tool=<이름> instance=<id> dur_ms=<N> ok` |
@@ -69,12 +69,26 @@ plugins/mcp-test/
 | 항목 | 이유 |
 |---|---|
 | 오류 메시지의 한국어 문구 | 파이썬 쪽 문구를 다듬으면 노드가 깨진다. 상태 코드와 `error` 키만 본다 |
-| uvicorn 이 자동으로 내는 줄 | `error` 카테고리는 uvicorn 것이고 Node 에 대응이 없다. 대신 **기동 시 `app` 카테고리 줄 하나**를 계약한다 |
+| **카테고리 집합 전체** | 아래 참조 |
 | 관리 페이지 HTML 전체 | CSS·공백·스크립트는 제외. `/fragments/sessions` 가 **같은 열 제목과 이스케이프된 같은 값**을 담는 것만 본다 |
 | `ping.pid` 의 값 | 값이 아니라 타입만 본다 |
 | 내부 파일 구성 | 노드는 노드 관용구를 따른다. 파일 이름·개수·분할을 맞추지 않는다 |
 | 도구 실패 로그의 `error=` | 파이썬은 예외 **클래스 이름**을 적는다(`_logged`). 두 언어의 예외 이름이 같을 이유가 없다. WARN 레벨과 `tool=` `instance=` `dur_ms=` 까지만 본다 |
 | `settings.json` 의 `log_dir` 층 | 아래 참조 |
+
+**카테고리 집합을 계약에서 뺀 이유.** 파이썬 서버를 실제로 띄워 로그를 받아 보면 우리 카테고리 넷 말고도 이런 줄이 섞인다.
+
+```
+2026-07-26T01:35:31Z INFO  error    Uvicorn running on http://127.0.0.1:18765 (Press CTRL+C to quit)
+2026-07-26T01:35:31Z INFO  streamable_http_manager StreamableHTTP session manager started
+2026-07-26T01:35:36Z WARN  transport_security Missing Content-Type header in POST request
+```
+
+핸들러를 **루트 로거**에 붙이기 때문이다(`logsetup.py`). uvicorn 과 파이썬 MCP SDK 가 자기 로거로 내는 줄이 그대로 딸려 온다. `streamable_http_manager` 는 8칸 정렬도 넘긴다.
+
+Node SDK 가 같은 이름의 카테고리를 낼 이유가 없다. 그래서 **"이 네 카테고리가 존재한다"만 계약하고 "카테고리가 이 넷뿐이다"는 계약하지 않는다.** 스위트는 우리 줄을 찾을 때 카테고리로 필터링하고, 모르는 카테고리가 섞여 있어도 실패하지 않아야 한다.
+
+기동 줄도 마찬가지다. `app` 카테고리 기동 줄 하나는 계약하되(§3.1), 그 앞뒤로 프레임워크가 무엇을 더 찍든 보지 않는다.
 
 **`settings.json` 층을 계약에서 뺀 이유.** `logpaths.py` 는 이 경로를 `Path.home()/".claude"/"settings.json"` 으로 하드코딩하고, 주입 지점은 `resolve_log_dir(settings_path=...)` 라는 **파이썬 함수 인자뿐**이다. 적합성 스위트는 CLI 와 HTTP 로만 서버를 몬다 — 진짜 `~/.claude/settings.json` 에 쓰지 않고는 이 층을 건드릴 수 없다.
 
@@ -136,6 +150,12 @@ pytest 로 쓴다. `server/tests/test_acceptance.py` 에 서버를 subprocess �
 **로그는 응답 완료가 아니라 시작에서 남긴다.** express 관용구인 `res.on('finish')` 는 여기서 틀렸다. `/api/logs/stream` 은 SSE 라 브라우저 탭이 닫힐 때까지 finish 하지 않으므로, 그 엔드포인트는 접근 로그가 한 줄도 남지 않는다. `res.writeHead` 를 감싸 첫 바이트에서 남긴다.
 
 **`express.json()` 은 POST 에만 건다.** GET(SSE 스트림)까지 걸면 transport 가 읽어야 할 스트림이 소진된다. MCP SDK 의 `handleRequest(req, res, body)` 는 POST 에서만 파싱된 본문을 받는다.
+
+**인자 없는 도구의 콜백은 `(extra)` 하나만 받는다.** SDK 의 `executeToolHandler` 는 `inputSchema` 유무로 갈린다 — 있으면 `(args, extra)`, 없으면 **`(extra)`**. 파이썬 FastMCP 는 `ctx: Context` 파라미터로 주입하므로 규약이 다르다. `ping` `whoami` `sessions` 는 인자가 없으므로 `(extra) => ...` 이고, 습관대로 `(_args, extra)` 라고 쓰면 `extra` 가 첫 인자에 들어가 **`whoami` 가 연결 ID 를 조용히 놓친다.** 오류는 나지 않는다.
+
+헤더는 `extra.requestInfo.headers` 에서 **소문자 키**로 읽는다.
+
+**`createMcpExpressApp()` 을 쓰지 않는다.** SDK 가 제공하는 이 헬퍼는 host 가 `127.0.0.1` 일 때 DNS 리바인딩 보호(Host 헤더 검증)를 자동으로 건다. 파이썬 서버에는 없는 동작이라 그만큼 두 런타임이 갈린다. 순수 `express()` 를 쓴다.
 
 **노드 transport 는 stateful 이어야 한다.** `sessionIdGenerator: () => randomUUID()` 를 준다. SDK 예제에 자주 보이는 `sessionIdGenerator: undefined`(stateless)를 쓰면 세션 ID 가 발급되지 않아 `session_view.mcp_session_id` 가 영원히 null 이 된다 — 계약한 필드의 타입이 뒤집히고 DELETE 경로도 성립하지 않는다.
 
