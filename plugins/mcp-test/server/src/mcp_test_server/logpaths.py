@@ -41,6 +41,13 @@ DEFAULT_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 
 
 def _clean(value: str) -> Path:
+    """사용자가 준 경로 문자열을 한 형태로 정규화한다.
+
+    이 값은 세 곳에서 온다 — CLI 플래그, 환경 변수, settings.json. 셋 다
+    사람이 손으로 적는 자리라 `~/logs` 같은 물결표와 상대 경로가 섞여
+    들어온다. 절대 경로로 맞춰 두면 로그에 찍히는 경로가 일관되고,
+    purge_logs 가 열려 있는 파일을 건너뛸 때 하는 경로 비교도 성립한다.
+    """
     return Path(value).expanduser().resolve()
 
 

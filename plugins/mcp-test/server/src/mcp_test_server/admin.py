@@ -77,6 +77,9 @@ _STOP_POLL_SECONDS = 1.0
 # 보고 있는 화면을 자기 소음으로 채운다. 세션 표는 몇 초 늦어도 무방하다.
 _SESSION_POLL_MS = 30000
 
+# 아래 세 템플릿은 str.format() 으로 렌더한다. 그래서 CSS 와 자바스크립트의
+# 중괄호가 전부 이중이다 — 하나라도 홑겹으로 두면 format() 이 그것을 치환
+# 자리로 읽고 KeyError 를 내 페이지가 통째로 500 이 된다.
 _PAGE = """<!doctype html>
 <html lang="ko">
 <head>
@@ -263,6 +266,13 @@ def build_admin_app(
         return StreamingResponse(events(), media_type="text/event-stream")
 
     def _toggle(action: str) -> Callable[[Request], object]:
+        """block 과 unblock 라우트를 같은 코드로 만든다.
+
+        두 핸들러는 부르는 레지스트리 메서드만 다르다. 클로저로 만들면
+        action 이 로그 문구와 응답에도 그대로 쓰여 두 경로가 갈라지지
+        않는다.
+        """
+
         async def handler(request: Request):
             instance_id = request.path_params["instance_id"]
             changed = (

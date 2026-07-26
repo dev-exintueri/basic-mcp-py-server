@@ -50,6 +50,10 @@ def _logged(fn):
     functools.wraps 가 __wrapped__ 를 남기므로 inspect.signature 가 원래
     시그니처를 따라간다. FastMCP 는 그것으로 스키마를 만들므로 도구의
     입력 스키마가 바뀌지 않는다 — ctx: Context 는 그대로 제외된다.
+
+    이 데코레이터는 @mcp.tool() **아래**에 온다. tool() 은 등록만 하고
+    받은 함수를 그대로 돌려주므로, 위아래를 바꾸면 등록되는 것은 원본이고
+    이 래퍼는 아무도 부르지 않는다.
     """
 
     @functools.wraps(fn)
