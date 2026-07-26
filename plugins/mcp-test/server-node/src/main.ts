@@ -16,6 +16,13 @@
  * 새 숫자 인자를 추가한다면 파이썬 __main__.py 의 add_argument 타입을 먼저
  * 확인하고 어느 쪽을 쓸지 정한다.
  *
+ * 빈 문자열·공백만인 문자열은 먼저 거부한다. `Number('')` 와
+ * `Number('   ')` 는 자바스크립트에서 0이라, 이 가드가 없으면
+ * `--port ''` 가 requireInt() 를 조용히 통과해 포트 0(임의 포트)으로
+ * 뜬다. 파이썬 argparse 는 `int('')` 에서 ValueError 를 내고 exit 2로
+ * 거부하므로(conformance/test_cli.py 의 test_empty_numeric_flag_is_rejected
+ * 가 실측), 두 런타임을 맞추려면 숫자로 변환하기 전에 공백을 먼저 본다.
+ *
  * 파일 끝의 실행 가드(`process.argv[1] === fileURLToPath(import.meta.url)`)
  * 는 파이썬의 `if __name__ == "__main__":` 과 같은 역할이다. parseArgs() 를
  * 테스트가 import 할 때 실 서버가 뜨는 부작용 없이 함수만 가져오려면
@@ -38,10 +45,20 @@ export interface Options {
   logRetentionDays: number;
 }
 
+// Number('') 와 Number('   ') 는 0이다. 빈 문자열·공백만인 문자열을 숫자로
+// 바꾸기 전에 걸러낸다 — 걸러내지 않으면 "값을 안 준 것"과 "0을 준 것"이
+// 구별되지 않는다.
+function isBlank(raw: string): boolean {
+  return raw.trim() === '';
+}
+
 // 파이썬 argparse 의 type=int 를 흉내 낸다: 정수가 아니면(소수점 포함)
 // 거부하지만, 음수나 0 은 그대로 통과시킨다 — argparse 도 그 값을 받아들이고
 // 나중에 listen() 이 실패하게 둔다. 여기서 막으면 파이썬보다 더 엄격해진다.
 function requireInt(name: string, raw: string | undefined, fallback: number): number {
+  if (raw !== undefined && isBlank(raw)) {
+    throw new Error(`--${name} 은(는) 정수여야 한다`);
+  }
   const value = Number(raw ?? fallback);
   if (!Number.isInteger(value)) {
     throw new Error(`--${name} 은(는) 정수여야 한다`);
@@ -51,6 +68,9 @@ function requireInt(name: string, raw: string | undefined, fallback: number): nu
 
 // 파이썬 argparse 의 type=float 를 흉내 낸다: 숫자로 못 읽을 때만 거부한다.
 function requireFloat(name: string, raw: string | undefined, fallback: number): number {
+  if (raw !== undefined && isBlank(raw)) {
+    throw new Error(`--${name} 은(는) 숫자여야 한다`);
+  }
   const value = Number(raw ?? fallback);
   if (Number.isNaN(value)) {
     throw new Error(`--${name} 은(는) 숫자여야 한다`);
