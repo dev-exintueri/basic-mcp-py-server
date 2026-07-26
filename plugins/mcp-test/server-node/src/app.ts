@@ -31,6 +31,8 @@ import { isIPv4, isIPv6 } from 'node:net';
 import { accessLog } from './access.js';
 import { authMiddleware } from './auth.js';
 import { getLogger, type Clock } from './logging.js';
+import { buildMcp } from './mcpServer.js';
+import { mcpRoute } from './mcpRoute.js';
 import { Registry } from './registry.js';
 
 const logger = getLogger('app');
@@ -97,11 +99,19 @@ export interface ServeOptions {
   clock: Clock;
 }
 
-export function buildMcpApp(registry: Registry, clock: Clock): Express {
+export function buildMcpApp(registry: Registry, startedAt: Date, clock: Clock): Express {
   const app = express();
   // 순서가 계약이다. 접근 로그가 바깥, 인증이 안쪽.
   app.use(accessLog());
+  // express.json() 은 POST 에만 건다. GET(알림용 SSE 스트림)까지 걸면
+  // transport 가 읽어야 할 스트림이 소진된다.
+  app.post('/mcp', express.json());
   app.use(authMiddleware(registry, clock));
+
+  const route = mcpRoute(() => buildMcp(registry, startedAt, clock));
+  app.post('/mcp', route);
+  app.get('/mcp', route);
+  app.delete('/mcp', route);
   return app;
 }
 
@@ -112,8 +122,9 @@ export async function serve(options: ServeOptions): Promise<{ close: () => Promi
     logger.warn(warning);
   }
 
+  const startedAt = options.clock();
   const registry = new Registry(options.staleAfter);
-  const mcpApp = buildMcpApp(registry, options.clock);
+  const mcpApp = buildMcpApp(registry, startedAt, options.clock);
 
   const mcpServer = createServer(mcpApp);
   await listen(mcpServer, options.port, options.host);
