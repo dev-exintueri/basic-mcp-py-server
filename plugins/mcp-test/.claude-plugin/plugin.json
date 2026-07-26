@@ -1,6 +1,6 @@
 {
   "name": "mcp-test",
-  "description": "여러 Claude 세션이 하나의 파이썬 프로세스에 붙는 MCP 테스트 서버",
+  "description": "여러 Claude 세션이 하나의 서버 프로세스(파이썬 또는 Node.js)에 붙는 MCP 테스트 서버",
   "version": "0.1.0",
   "author": { "name": "exintueri" },
   "userConfig": {
