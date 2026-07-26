@@ -174,6 +174,13 @@ ${rows}
   // POST /api/sessions/:id/block 에 200KB 본문을 보내는 요청이 노드에서만
   // 413 으로 실패한다(파이썬은 404 — 본문을 안 보고 라우트 자체가 없다고
   // 답한다).
+  //
+  // 이 미들웨어를 지우려는 사람에게: 여기 라우트 중 req.body 를 읽는 것이
+  // 하나도 없으므로 지워도 동작은 같아 보인다. 그런데 이것이 이 앱에서
+  // 오류 처리기까지 도달하는 유일한 통로다 — 지우면 적합성의
+  // test_admin_error_responses_are_json_with_an_error_key_and_no_server_paths
+  // 가 404 JSON 으로 여전히 통과하면서 오류 처리기를 전혀 겨냥하지 않게 된다.
+  // 테스트가 깨지지 않고 조용히 공허해지는 쪽이라 눈에 띄지 않는다.
   app.use(express.urlencoded({ extended: false, limit: Infinity }));
 
   app.get('/api/status', (_req: Request, res: Response) => {

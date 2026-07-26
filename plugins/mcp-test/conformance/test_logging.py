@@ -184,6 +184,12 @@ def test_control_characters_in_a_malformed_body_cannot_forge_a_log_line(server) 
 
     text = server.log_text()
     # splitlines() 로 쪼갠 뒤에 검사하지 않는다 — 이유는 위 테스트와 같다.
+    #
+    # 이 단언은 캐리지 리턴만 본다. 줄바꿈 단독 누출은 두 런타임 계약이
+    # 아니라 노드 단위 테스트(logging.test.ts)가 잡는다. 로그 줄의 구분자가
+    # 줄바꿈이라 여기서 그것까지 세려면 "우리 카테고리 줄 수" 를 기대값과
+    # 맞춰야 하고, 그 기대값은 섞여 드는 SDK 카테고리 때문에 런타임마다
+    # 다르다 — 계약의 범위를 절반으로 둔 것은 그 이유다.
     assert "\r" not in text
 
 
