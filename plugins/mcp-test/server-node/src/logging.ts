@@ -17,8 +17,12 @@
  * logPaths 의 tailLines() 백필이 그 형식을 그대로 보여주므로 함께 본다.
  * 그리고 conformance 스위트가 이 형식을 단언한다.
  *
- * **깨면 안 되는 것.** 카테고리가 8칸을 넘어도 자르지 않는다. 자르면
- * 어느 로거가 냈는지 알 수 없어진다.
+ * **깨면 안 되는 것.**
+ * - 카테고리가 8칸을 넘어도 자르지 않는다. 자르면 어느 로거가 냈는지 알 수 없어진다.
+ * - 시계는 configureLogging() 으로 반드시 주입된다. 모듈 안에서 new Date() 를
+ *   부르지 않는다. configureLogging() 이전의 로그 호출은 아무 데도 나가지 않는다.
+ * - sink 예외는 삼키되, stderr 로 오류를 알린다. 한 목적지의 실패가 나머지
+ *   목적지에 영향을 주면 안 된다.
  */
 
 export type Clock = () => Date;
@@ -46,7 +50,7 @@ export interface Logger {
 export type Sink = (line: string) => void;
 
 let sinks: Sink[] = [];
-let currentClock: Clock = () => new Date();
+let currentClock: Clock | null = null;
 
 export function configureLogging(options: { clock: Clock; sinks: Sink[] }): void {
   currentClock = options.clock;
@@ -55,18 +59,28 @@ export function configureLogging(options: { clock: Clock; sinks: Sink[] }): void
 
 export function resetLogging(): void {
   sinks = [];
-  currentClock = () => new Date();
+  currentClock = null;
 }
 
 export function getLogger(category: string): Logger {
   const emit = (level: Level, message: string): void => {
+    // configureLogging() 이전, 또는 sinks 가 없으면 아무 데도 나가지 않는다.
+    if (!currentClock || sinks.length === 0) {
+      return;
+    }
     const line = formatLine(currentClock, level, category, message);
     for (const sink of sinks) {
       try {
         sink(line);
-      } catch {
+      } catch (error) {
         // 로깅이 애플리케이션을 죽이면 안 된다. 한 목적지가 실패해도
-        // 나머지 목적지에는 남긴다.
+        // 나머지 목적지에는 남긴다. 오류는 stderr 로 알린다.
+        try {
+          const message = error instanceof Error ? error.message : String(error);
+          process.stderr.write(`[logging error] ${message}\n`);
+        } catch {
+          // stderr 쓰기도 실패하면 무시한다.
+        }
       }
     }
   };
