@@ -26,6 +26,17 @@
  * - dailyFileSink() 의 쓰기 실패도 같은 이유로 삼킨다. 이 sink 는 접근 로그
  *   미들웨어와 모든 도구 호출 안에서 돌므로, 디스크가 꽉 찼다고 요청 처리가
  *   죽으면 안 된다.
+ * - formatLine() 이 캐리지 리턴과 줄바꿈을 이스케이프하는 **유일한** 자리다.
+ *   호출자마다 거는 방식(access.ts 가 원래 그렇게 했다)은 새 호출자가
+ *   생길 때마다 다시 걸어야 하고, 하나라도 빠뜨리면 그 호출자를 거치는
+ *   메시지만 조용히 샌다 — 실제로 errorHandler.ts 가 body-parser 의
+ *   SyntaxError 메시지(V8 이 요청 본문 앞부분을 그대로 되울린다)를 손보지
+ *   않고 logger.error() 에 넘기면서 이 구멍에 걸렸다: 본문에 진짜 CR/LF 를
+ *   심으면 로그 줄 하나가 둘로 쪼개졌다(최종 리뷰 재재검토, 실측). 이
+ *   함수가 모든 sink 호출의 유일한 조립 지점이므로 여기서 한 번 걸면
+ *   지금 있는 호출자와 앞으로 생길 모든 호출자를 함께 덮는다. access.ts
+ *   의 기존 이스케이프는 이미 escape 된 문자열을 다시 escape 하는 것뿐이라
+ *   무해하니 지우지 않는다.
  */
 
 import { appendFileSync, mkdirSync } from 'node:fs';
@@ -46,7 +57,12 @@ export function formatLine(
   category: string,
   message: string,
 ): string {
-  return `${stamp(clock)} ${level.padEnd(5)} ${category.padEnd(8)} ${message}`;
+  const line = `${stamp(clock)} ${level.padEnd(5)} ${category.padEnd(8)} ${message}`;
+  // 캐리지 리턴과 줄바꿈을 조립이 끝난 한 줄에 한 번 건다 — 이유는 위
+  // 모듈 주석의 "깨면 안 되는 것"에 있다. message 는 호출자마다 다른
+  // 곳(요청 경로, 예외 메시지, ...)에서 오므로 여기서 막아야 새 호출자가
+  // 생겨도 조용히 새지 않는다.
+  return line.replace(/\r/g, '\\r').replace(/\n/g, '\\n');
 }
 
 export interface Logger {

@@ -19,6 +19,19 @@ describe('formatLine', () => {
     expect(formatLine(fixed, 'INFO', 'verylongcategory', 'x'))
       .toBe('2026-07-26T01:35:36Z INFO  verylongcategory x');
   });
+
+  it('message 안의 캐리지 리턴과 줄바꿈을 이스케이프한다', () => {
+    // formatLine() 의 이스케이프를 지우면(재재검토가 실측한 결함) 이
+    // 단언이 깨진다 — errorHandler.ts 가 body-parser 의 SyntaxError
+    // 메시지(V8 이 요청 본문 앞부분을 그대로 담는다)를 그대로 넘겨도, 실제
+    // 로그 파일에는 원문 CR/LF 가 아니라 이 리터럴 문자열이 남아야 한다.
+    // access.ts 가 이미 escape 해서 넘기는 message 를 여기서 다시 escape
+    // 해도 두 번 escape 되지 않는다 — 그 문자열엔 이미 raw \r/\n 이 없다.
+    const escaped = formatLine(fixed, 'ERROR', 'app', '요청 처리 중 예외: Unexpected token, "ZZZ\r\n2026-" is not valid JSON');
+    expect(escaped).not.toContain('\r');
+    expect(escaped).not.toContain('\n');
+    expect(escaped).toContain('ZZZ\\r\\n2026-');
+  });
 });
 
 describe('getLogger', () => {
