@@ -1,0 +1,16 @@
+[project]
+name = "mcp-test-conformance"
+version = "0.1.0"
+description = "파이썬 서버와 노드 서버가 같은 계약을 지키는지 검증한다"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.28,<2",
+    "httpx>=0.27",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-timeout>=2.3",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+timeout = 60
