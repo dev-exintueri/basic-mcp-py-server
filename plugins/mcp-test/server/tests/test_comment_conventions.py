@@ -19,9 +19,6 @@ import pytest
 SRC = Path(__file__).resolve().parents[1] / "src" / "mcp_test_server"
 SECTION = "## 응용할 때"
 
-# Task 2 에서 이 목록을 패키지 전체 순회로 넓힌다.
-_CORE = ("mcp_server.py", "registry.py", "auth.py", "admin.py", "app.py")
-
 
 def _module_paths() -> list[Path]:
     return sorted(SRC.glob("*.py"))
@@ -37,8 +34,12 @@ def test_source_directory_is_where_we_think_it_is() -> None:
     assert len(_module_paths()) >= 11
 
 
-@pytest.mark.parametrize("name", _CORE)
-def test_core_modules_document_how_to_extend_them(name: str) -> None:
-    doc = _docstring(SRC / name)
-    assert doc is not None, f"{name} 에 모듈 독스트링이 없다"
-    assert SECTION in doc, f"{name} 의 독스트링에 '{SECTION}' 절이 없다"
+_MODULES = _module_paths()
+
+
+@pytest.mark.parametrize("path", _MODULES, ids=[p.name for p in _MODULES])
+def test_every_module_documents_how_to_extend_it(path: Path) -> None:
+    """새 모듈을 만들면서 이 절을 빠뜨리는 것을 잡는다."""
+    doc = _docstring(path)
+    assert doc is not None, f"{path.name} 에 모듈 독스트링이 없다"
+    assert SECTION in doc, f"{path.name} 의 독스트링에 '{SECTION}' 절이 없다"

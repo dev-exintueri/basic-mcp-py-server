@@ -6,6 +6,25 @@
 
 configure_logging() 은 __main__.main() 에서만 부른다. build_stack() 이
 부르면 테스트가 돌 때마다 전역 로깅 상태가 오염된다.
+
+아래 주석의 "스펙 §N" 은 전부
+`docs/superpowers/specs/2026-07-25-server-logging-design.md` 를 가리킨다.
+
+## 응용할 때
+
+**바꿔도 되는 것.** `ClockFormatter.format()` 의 줄 형식과 `_LEVEL_NAMES`,
+`configure_logging()` 의 기본 레벨.
+
+**함께 바꿔야 하는 것.** 줄 형식을 바꾸면 관리 화면의 로그 패널과
+`logpaths.tail_lines()` 백필이 그 형식을 그대로 보여주므로 함께 본다.
+
+**깨면 안 되는 것.**
+
+- 핸들러는 루트 로거에 붙인다. 패키지 로거로 옮기면 uvicorn 의 줄이
+  파일에 남지 않는다.
+- `configure_logging()` 은 `__main__.main()` 에서만 부른다.
+- `DailyFileHandler.emit()` 이 회전 실패를 삼키고 상태를 나중에 옮기는
+  순서. 여기서 예외가 새면 로그 실패가 요청 처리를 통째로 죽인다.
 """
 
 from __future__ import annotations

@@ -1,4 +1,19 @@
-"""CLI 진입점."""
+"""CLI 진입점.
+
+## 응용할 때
+
+**바꿔도 되는 것.** CLI 인자. 새 인자는 `parse_args()` 에 더하고
+`serve()` 로 넘긴다.
+
+**깨면 안 되는 것.**
+
+- 경로 해석 경고는 로깅이 준비된 **뒤에** 남긴다. 경로를 정하는 동안에는
+  남길 곳이 없다.
+- `except BaseException` 은 오타가 아니다. uvicorn 이 바인딩에 실패하면
+  `sys.exit()` 를 부르고 그 `SystemExit` 은 `Exception` 이 아니다.
+- `finally` 의 `logging.shutdown()` 을 지우지 않는다. `atexit` 만으로는
+  늦다 — 그때는 핸들러가 참조하는 모듈 전역이 이미 사라졌을 수 있다.
+"""
 
 from __future__ import annotations
 

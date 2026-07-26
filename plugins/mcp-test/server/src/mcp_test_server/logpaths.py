@@ -3,6 +3,23 @@
 여기 있는 함수들은 configure_logging() 보다 먼저 돈다 — 디렉토리를 정해야
 파일 핸들러를 만들 수 있기 때문이다. 그래서 경고를 직접 로깅하지 않고
 문자열 목록으로 돌려주고, 호출자가 로깅이 준비된 뒤에 남긴다.
+
+## 응용할 때
+
+**바꿔도 되는 것.** `DEFAULT_LOG_DIR`, `log_file_name()` 의 형식,
+`MAX_AGE_SECONDS` 기본값.
+
+**함께 바꿔야 하는 것.**
+
+- `LOG_GLOB` 과 `log_file_name()` 은 한 쌍이다. 한쪽만 바꾸면 청소가
+  아무것도 찾지 못해 로그가 영영 쌓인다 — 오류는 나지 않는다.
+- `_PLUGIN_ID_PREFIX` 는 플러그인 쪽 `.claude-plugin/plugin.json` 의
+  `name` 과 맞물린다. 어긋나면 `log_dir` 플러그인 설정을 조용히 못 읽고
+  기본 경로로 떨어진다.
+
+**깨면 안 되는 것.** `purge_logs` 가 `LOG_GLOB` 에 맞는 파일만, 비재귀로
+보는 것. `log_dir` 은 사용자가 정하므로 홈 디렉토리를 가리킬 수도 있다 —
+패턴을 넓히거나 재귀로 바꾸면 남의 파일을 지운다.
 """
 
 from __future__ import annotations
