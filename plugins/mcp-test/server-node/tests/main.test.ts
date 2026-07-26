@@ -30,12 +30,27 @@ describe('parseArgs', () => {
     expect(parseArgs(['--port', '0']).port).toBe(0);
   });
 
+  it('--port 가 빈 문자열·공백만이면 거부한다 (Task 9: 실측한 CLI 파리티 결함)', () => {
+    // Number('') === 0, Number('   ') === 0 이다. requireInt() 가 이 값을
+    // 그냥 Number() 에 넘기면 정수 판정을 조용히 통과해 포트 0(임의
+    // 포트)으로 뜬다. 파이썬 argparse 는 int('') 에서 ValueError 를 내고
+    // exit 2로 거부한다(conformance/test_cli.py::test_empty_numeric_flag_is_rejected
+    // 가 실측) — 두 런타임을 맞추려면 숫자로 바꾸기 전에 공백을 봐야 한다.
+    expect(() => parseArgs(['--port', ''])).toThrow();
+    expect(() => parseArgs(['--port', '   '])).toThrow();
+  });
+
   it('--admin-port 가 정수가 아니면 거부한다', () => {
     expect(() => parseArgs(['--admin-port', 'abc'])).toThrow();
   });
 
   it('--stale-after 가 숫자가 아니면 거부한다', () => {
     expect(() => parseArgs(['--stale-after', 'abc'])).toThrow();
+  });
+
+  it('--stale-after 가 빈 문자열·공백만이면 거부한다', () => {
+    // requireFloat() 도 requireInt() 와 같은 공백 가드를 쓴다.
+    expect(() => parseArgs(['--stale-after', ''])).toThrow();
   });
 
   it('--stale-after 는 소수·음수·0 을 그대로 받는다 (파이썬 type=float 와 동일)', () => {
