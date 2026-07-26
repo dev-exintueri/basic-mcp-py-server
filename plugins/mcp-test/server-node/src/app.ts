@@ -14,11 +14,19 @@
  *   바꿀 수 있는 통로를 만들지 않는다.
  * - createMcpExpressApp() 을 쓰지 않는다. 그 헬퍼는 Host 헤더 검증을
  *   자동으로 걸어 파이썬 서버와 동작이 갈린다.
+ *
+ * **함께 바꿔야 하는 것.** isLoopback() 은 파이썬 app.py 의 is_loopback()
+ * (표준 라이브러리 ipaddress.ip_address(...).is_loopback 판정)을 흉내
+ * 낸다 — 127.0.0.0/8 전체, ::1, IPv4-mapped IPv6(::ffff:127.x.x.x), 그리고
+ * "localhost" 문자열이 참이다. 이 판정을 바꾸면 파이썬 쪽 test_app.py 의
+ * 파라미터라이즈 표와 tests/app.test.ts 의 표를 함께 봐야 한다 — 두 표는
+ * 같은 입력·출력 쌍이어야 "밖에서 구별되지 않는다"는 계약이 유지된다.
  */
 
 import express from 'express';
 import type { Express } from 'express';
 import { createServer, type Server } from 'node:http';
+import { isIPv4, isIPv6 } from 'node:net';
 
 import { accessLog } from './access.js';
 import { authMiddleware } from './auth.js';
@@ -40,8 +48,24 @@ export const DEFAULTS = {
 
 const WILDCARD_HOSTS = new Set(['0.0.0.0', '::']);
 
+// ::ffff:a.b.c.d 형태의 IPv4-mapped IPv6 주소에서 매핑된 IPv4 부분을 꺼낸다.
+// 파이썬 ipaddress.IPv6Address.is_loopback 은 이 형태를 만나면 매핑된
+// IPv4 주소의 is_loopback 을 대신 본다 — 그 판정을 그대로 흉내 낸다.
+const IPV4_MAPPED = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i;
+
+function ipv4IsLoopback(host: string): boolean {
+  // 127.0.0.0/8 전체가 루프백이다. 첫 옥텟만 보면 된다.
+  return host.split('.', 1)[0] === '127';
+}
+
 export function isLoopback(host: string): boolean {
-  return host === '127.0.0.1' || host === '::1' || host.toLowerCase() === 'localhost';
+  if (isIPv4(host)) return ipv4IsLoopback(host);
+  if (isIPv6(host)) {
+    const mapped = IPV4_MAPPED.exec(host);
+    if (mapped) return ipv4IsLoopback(mapped[1]);
+    return host === '::1';
+  }
+  return host.toLowerCase() === 'localhost';
 }
 
 /** 바인딩 주소를 클라이언트가 실제로 접속할 수 있는 주소로 바꾼다. */
