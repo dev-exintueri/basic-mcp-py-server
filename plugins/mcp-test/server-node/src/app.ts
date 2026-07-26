@@ -220,13 +220,23 @@ export async function serve(options: ServeOptions): Promise<{ close: () => Promi
       // /api/logs/stream 뿐 아니라 MCP 쪽 알림용 GET 스트림에도 똑같이
       // 있기 때문이다.
       let timedOut = false;
+      let timer: NodeJS.Timeout;
       const timeout = new Promise<void>((resolve) => {
-        setTimeout(() => {
+        timer = setTimeout(() => {
           timedOut = true;
           resolve();
         }, GRACEFUL_SHUTDOWN_MS);
+        // closed 가 먼저 끝나는(흔한) 경로에서도 이 타이머가 남아 있으면
+        // clearTimeout() 을 부르기 전까지 이벤트 루프를 붙든다 — CLI 는
+        // main.ts 가 뒤이어 process.exit() 를 부르니 안 보이지만, close()
+        // 를 부르고 나서 그대로 프로세스를 계속 살려 두는 호출자(테스트
+        // 등)는 아무 이유 없이 GRACEFUL_SHUTDOWN_MS 만큼 그냥 기다리게
+        // 된다. unref() 는 clearTimeout() 을 놓치는 경로에 대한 이중
+        // 안전판이다 — purgeTimer 와 같은 이유다.
+        timer.unref();
       });
       await Promise.race([closed, timeout]);
+      clearTimeout(timer!);
       if (timedOut) {
         mcpServer.closeAllConnections();
         adminServer.closeAllConnections();
