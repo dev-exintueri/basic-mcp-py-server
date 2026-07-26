@@ -30,12 +30,18 @@ export class Subscriber {
     if (this.queue.length > 0) return this.queue.splice(0);
     await new Promise<void>((resolve) => {
       this.waiter = resolve;
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         if (this.waiter === resolve) {
           this.waiter = null;
           resolve();
         }
       }, timeoutMs);
+      // 줄이 먼저 도착해(push() 가 waiter() 를 먼저 불러) 이 promise 가
+      // 조기 resolve 되는 흔한 경로에서도 이 타이머는 그대로 남는다.
+      // unref() 없이는 clearTimeout() 을 부르기 전까지 최대 timeoutMs
+      // (admin.ts 의 SSE 라우트에서는 1000ms)만큼 이벤트 루프를 붙든다 —
+      // app.ts 의 purgeTimer/종료 타이머와 같은 이유다.
+      timer.unref();
     });
     return this.queue.splice(0);
   }
