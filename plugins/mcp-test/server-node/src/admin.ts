@@ -29,10 +29,26 @@
  * - `/api/logs/stream` 의 while 루프는 `shouldStop()` 이 참이 되면 스스로
  *   끝난다. 지우면 SSE 연결이 서버 종료를 막아, close() 가 열린 응답이
  *   끝나기를 무한정 기다리게 된다.
+ * - `/api/logs/stream` 이 끝날 때 `res.end()` 콜백 안에서 소켓을 직접
+ *   파괴한다. SSE 연결은 keep-alive 로 재사용될 일이 없는데, 파괴하지
+ *   않으면 노드 기본 `keepAliveTimeout`(5초)만큼 소켓이 살아남아 서버
+ *   종료가 그만큼 늦어진다 — 실측(리뷰): 관리 페이지를 열어 둔 채
+ *   SIGTERM 을 보내면 종료가 7초 넘게 걸렸다(파이썬은 0.38초). 파이썬은
+ *   `timeout_graceful_shutdown` 으로 상한을 두지만, 노드는 이 연결이 다시
+ *   쓰일 일이 없으므로 아예 즉시 닫는 쪽을 골랐다.
+ * - `res.write()` 가 `false` 를 돌려주면(쓰기 버퍼가 참) `drain` 이벤트를
+ *   기다린 뒤에 다음 줄을 쓴다. 이 대기를 건너뛰면 `LogBroadcaster` 의
+ *   `maxQueue` 상한이 실전에서 결코 닿지 않는다 — sink 의 publish() 가
+ *   동기 호출이라, 이 라우트가 매 줄을 즉시 res.write() 해 버리면
+ *   Subscriber 의 큐가 늘 1개 근처에 머물고 "오래된 것부터 버린다"는
+ *   불변식이 죽은 코드가 된다(리뷰 Important 3). 다만 이 대기는
+ *   `shouldStop()`/연결 종료와 경주해야 한다 — 그러지 않으면 멈춘
+ *   리더가 서버 종료 자체를 막는다.
  */
 
 import express from 'express';
 import type { Express, Request, Response } from 'express';
+import { once } from 'node:events';
 import { dirname } from 'node:path';
 
 import { accessLog } from './access.js';
@@ -47,6 +63,30 @@ const registryLogger = getLogger('registry');
 // 남기고 그 줄이 다시 로그 패널로 방송되므로, 주기를 짧게 두면 사용자가 보고
 // 있는 화면을 자기 소음으로 채운다.
 const SESSION_POLL_MS = 30000;
+
+/**
+ * res.write() 가 false(쓰기 버퍼 참)를 돌려줬을 때 drain 을 기다린다.
+ *
+ * once(res, 'drain') 을 그냥 기다리면, 클라이언트가 영영 안 읽을 때(탭을
+ * 열어만 두고 최소화한 브라우저 등) 서버 종료 신호가 와도 이 대기가 풀리지
+ * 않는다. 그래서 1초마다 깨어나 `shouldAbort()` 를 다시 보고, 참이면 drain
+ * 을 기다리지 않고 그냥 돌아간다 — 호출부가 그 뒤 바깥 while 루프에서
+ * closed/shouldStop() 을 보고 스스로 끝난다.
+ */
+async function waitForWritable(res: Response, shouldAbort: () => boolean): Promise<void> {
+  while (!shouldAbort()) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1000);
+    try {
+      await once(res, 'drain', { signal: controller.signal });
+      return;
+    } catch {
+      // 1초 안에 drain 이 안 왔다. shouldAbort() 를 다시 보러 루프 상단으로.
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
 
 export function escapeHtml(value: string): string {
   return value
@@ -224,15 +264,32 @@ new EventSource('/api/logs/stream').onmessage = (event) => {
         }
         idle = 0;
         for (const line of lines) {
+          if (closed || shouldStop()) break;
           // 트레이스백은 여러 줄이다. 줄마다 data: 를 붙이지 않으면 SSE
           // 프레이밍이 깨진다.
           const payload = line.split('\n').map((part) => `data: ${part}\n`).join('');
-          res.write(payload + '\n');
+          // res.write() 가 false 를 돌려주면 쓰기 버퍼가 찼다는 뜻이다 —
+          // 클라이언트가 못 따라가고 있다. 여기서 기다리지 않고 계속
+          // 쓰면(버퍼링만 늘어난다) LogBroadcaster 의 maxQueue 상한이 결코
+          // 문제 되지 않는다. 자세한 이유는 위 모듈 주석에 있다.
+          if (!res.write(payload + '\n')) {
+            await waitForWritable(res, () => closed || shouldStop());
+          }
         }
       }
     } finally {
       broadcaster.unsubscribe(subscriber);
-      res.end();
+      // res.end() 뒤에는 res.socket 이 null 이 될 수 있다 — 노드가 keep-alive
+      // 재사용을 위해 소켓을 응답 객체에서 떼어내기 때문이다(detachSocket).
+      // 그래서 떼이기 전에 참조를 미리 잡아 둔다. 응답이 실제로 플러시된
+      // 뒤(콜백 시점)에 그 소켓을 파괴한다 — SSE 연결은 keep-alive 로
+      // 재사용되지 않으므로, 파괴하지 않고 두면 노드 기본
+      // keepAliveTimeout(5초) 만큼 그대로 눕는다. 자세한 이유는 위 모듈
+      // 주석에 있다.
+      const socket = res.socket;
+      res.end(() => {
+        if (socket && !socket.destroyed) socket.destroy();
+      });
     }
   });
 
