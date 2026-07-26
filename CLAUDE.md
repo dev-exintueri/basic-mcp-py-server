@@ -54,6 +54,11 @@ question: 질문 원문 한 줄
 
 이 저장소의 코드는 **포크해서 자기 MCP 서버를 만드는 데 쓰인다.** 주석은 그 독자를 위해 쓴다.
 
+이 규약은 **두 런타임 모두에 적용된다.** 파이썬은 모듈 독스트링에,
+노드(`plugins/mcp-test/server-node/`)는 파일 머리 JSDoc 블록에 같은 절을
+둔다. 파이썬 쪽은 `tests/test_comment_conventions.py` 가, 노드 쪽은
+`tests/commentConventions.test.ts` 가 빠뜨림을 잡는다.
+
 ### 무엇을 쓰나
 
 - **모듈 독스트링** — 이 파일의 목적 한 줄, 그리고 이 파일에서 가장 비자명한 성질. 예: `access.py` 는 왜 `AuthMiddleware` 바깥에 서는지, `registry.py` 는 왜 락이 없는지.
@@ -75,7 +80,8 @@ question: 질문 원문 한 줄
 
 만질 일이 없는 파일이면 그렇다고 적는다. 그것도 정보다.
 
-**새 모듈을 만들면 이 절도 함께 쓴다.** 빠뜨리면 `tests/test_comment_conventions.py` 가 잡는다.
+**새 모듈을 만들면 이 절도 함께 쓴다.** 빠뜨리면 파이썬은
+`tests/test_comment_conventions.py` 가, 노드는 `tests/commentConventions.test.ts` 가 잡는다.
 
 ### 언어와 인용
 

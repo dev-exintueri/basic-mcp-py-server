@@ -1,7 +1,8 @@
 # basic-mcp-py-server
 
-여러 Claude Code 세션이 **하나의 파이썬 프로세스**에 MCP로 붙는 테스트 서버다.
-이 저장소 자체가 플러그인 마켓플레이스이기도 하다.
+여러 Claude Code 세션이 **하나의 서버 프로세스(파이썬 또는 Node.js)**에 MCP로 붙는
+테스트 서버다. 두 런타임은 같은 계약을 지키므로 어느 쪽을 띄우든 클라이언트 쪽
+동작은 같다. 이 저장소 자체가 플러그인 마켓플레이스이기도 하다.
 
 설계 근거는 [설계 문서](docs/superpowers/specs/2026-07-25-mcp-test-server-plugin-design.md)에 있다.
 
@@ -32,16 +33,26 @@ claude plugin install mcp-test@basic-mcp-py-server
 ## 서버 기동
 
 플러그인 설치와 서버 기동은 별개다. 서버는 독립 프로세스로 직접 띄운다.
+런타임은 파이썬과 Node.js 둘 중 하나를 고른다 — 둘은 같은 계약을 지키므로
+클라이언트 쪽에서는 어느 쪽이 떠 있는지 구분할 필요가 없다.
 
 ```bash
-# 저장소에서 (개발 중)
+# 파이썬 서버 (저장소에서, 개발 중)
 uv run --directory plugins/mcp-test/server mcp-test-server
 
-# 포트 변경
+# 노드 서버 (저장소에서, 개발 중)
+cd plugins/mcp-test/server-node && npm install && npm run build && node dist/main.js
+
+# 포트 변경 (파이썬 예시. 노드도 같은 플래그를 받는다)
 uv run --directory plugins/mcp-test/server mcp-test-server --port 9000 --admin-port 9001
 ```
 
-Claude Code 안에서는 `/mcp-test:server-start` 로도 띄울 수 있다.
+두 런타임은 **같은 포트를 쓰므로 동시에 띄울 수 없다.** 다른 런타임으로
+바꾸려면 먼저 띄워 둔 쪽을 내려야 한다. MCP 클라이언트 쪽 설정(`.mcp.json`)은
+어느 런타임이 떠 있든 그대로 동작한다 — 바꿀 필요가 없다.
+
+Claude Code 안에서는 `/mcp-test:server-start python` 또는
+`/mcp-test:server-start node` 로도 띄울 수 있다.
 
 기동하면 두 주소가 열린다.
 
@@ -117,6 +128,7 @@ DNS 리바인딩을 쓰면 `/api/status` 를 읽어 연결 ID, 프로젝트 경�
 - [ ] 서버를 끄고 새 `claude` 세션 시작 → `SessionStart` 훅이 기동 안내를 출력하는지 확인
 - [ ] 서버를 띄우고 `~/.mcp-test-server/logs/`에 파일이 생기는지 본다
 - [ ] 관리 화면을 열어 둔 채 다른 세션에서 도구를 부르면 로그가 실시간으로 붙는지 본다
+- [ ] node 로 띄운 뒤 같은 체크리스트를 다시 돌려 결과가 같은지 본다
 
 세션에 사람이 읽을 이름을 붙이려면 `MCP_TEST_LABEL` 을 다르게 주고 실행한다.
 
@@ -128,11 +140,21 @@ MCP_TEST_LABEL=right claude
 ## 개발
 
 ```bash
+# 파이썬 서버 단위 테스트
 uv run --directory plugins/mcp-test/server pytest -v
+
+# 노드 서버 단위 테스트
+cd plugins/mcp-test/server-node && npm test
+
+# 두 서버가 같은 계약을 지키는지 (적합성 스위트)
+uv run --directory plugins/mcp-test/conformance pytest -v --target=python
+uv run --directory plugins/mcp-test/conformance pytest -v --target=node
 ```
 
 ## 문서
 
 - [설계 문서](docs/superpowers/specs/2026-07-25-mcp-test-server-plugin-design.md)
 - [구현 계획](docs/superpowers/plans/2026-07-25-mcp-test-server-plugin.md)
+- [노드 서버 설계 문서](docs/superpowers/specs/2026-07-26-nodejs-server-design.md)
+- [노드 서버 구현 계획](docs/superpowers/plans/2026-07-26-nodejs-server.md)
 - [Claude Code MCP 공식 문서 사본](docs/claude-base/README.md)

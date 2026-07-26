@@ -16,7 +16,7 @@ case "$code" in
   401)
     ;;
   000)
-    echo "MCP 테스트 서버($url)가 응답하지 않는다. /mcp-test:server-start 로 띄워라."
+    echo "MCP 테스트 서버($url)가 응답하지 않는다. /mcp-test:server-start python 또는 /mcp-test:server-start node 로 띄워라."
     ;;
   *)
     echo "MCP 테스트 서버($url)가 예상 밖의 상태다: HTTP $code (401을 기대했다)."
