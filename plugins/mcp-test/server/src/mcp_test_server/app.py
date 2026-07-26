@@ -17,7 +17,7 @@ from starlette.types import ASGIApp
 from .access import AccessLogMiddleware
 from .admin import build_admin_app
 from .auth import AuthMiddleware
-from .logpaths import purge_logs
+from .logpaths import MAX_AGE_SECONDS, purge_logs
 from .logsetup import LoggingHandle
 from .logstream import LogBroadcaster
 from .mcp_server import build_mcp
@@ -203,6 +203,7 @@ async def _purge_loop(
     clock: Callable[[], datetime],
     log_dir: Path | None,
     log_file: Callable[[], Path | None],
+    max_age_seconds: float,
 ) -> None:
     while True:
         await asyncio.sleep(_PURGE_INTERVAL_SECONDS)
@@ -211,7 +212,9 @@ async def _purge_loop(
         if purged:
             registry_logger.info("오래된 세션 %d개를 정리했다", purged)
         if log_dir is not None:
-            removed, warnings = purge_logs(log_dir, now, keep=log_file())
+            removed, warnings = purge_logs(
+                log_dir, now, keep=log_file(), max_age_seconds=max_age_seconds
+            )
             if removed:
                 logger.info("오래된 로그 %d개를 지웠다", removed)
             for warning in warnings:
@@ -242,6 +245,7 @@ async def serve(
     admin_port: int,
     stale_after: float,
     handle: LoggingHandle | None = None,
+    log_max_age_seconds: float = MAX_AGE_SECONDS,
 ) -> None:
     """두 리스너를 동시에 띄운다. 하나가 죽으면 함께 끝난다."""
     ensure_port_free(host, port)
@@ -302,12 +306,16 @@ async def serve(
     if log_dir is not None:
         print(f"로그   {log_file()}")
         # 기동 직후 한 번 청소한다. _purge_loop 는 10분 뒤에야 처음 돈다.
-        _, warnings = purge_logs(log_dir, _utcnow(), keep=log_file())
+        _, warnings = purge_logs(
+            log_dir, _utcnow(), keep=log_file(), max_age_seconds=log_max_age_seconds
+        )
         for message in warnings:
             logger.warning("%s", message)
     logger.info("서버 기동 MCP=%s:%s 관리=%s:%s", host, port, ADMIN_HOST, admin_port)
 
-    purge = asyncio.create_task(_purge_loop(registry, _utcnow, log_dir, log_file))
+    purge = asyncio.create_task(
+        _purge_loop(registry, _utcnow, log_dir, log_file, log_max_age_seconds)
+    )
     try:
         await asyncio.gather(mcp_server.serve(), admin_server.serve())
     finally:

@@ -260,7 +260,9 @@ async def test_purge_loop_uses_the_injected_clock(monkeypatch):
     far_future = real_now + timedelta(seconds=120)
 
     task = asyncio.create_task(
-        app_module._purge_loop(registry, lambda: far_future, None, lambda: None)
+        app_module._purge_loop(
+            registry, lambda: far_future, None, lambda: None, app_module.MAX_AGE_SECONDS
+        )
     )
     try:
 
@@ -307,7 +309,11 @@ async def test_purge_loop_cleans_log_files(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(app_module, "_PURGE_INTERVAL_SECONDS", 0.0)
     task = asyncio.create_task(
         app_module._purge_loop(
-            Registry(stale_after=300.0), lambda: T0, tmp_path, lambda: None
+            Registry(stale_after=300.0),
+            lambda: T0,
+            tmp_path,
+            lambda: None,
+            app_module.MAX_AGE_SECONDS,
         )
     )
     try:
@@ -347,7 +353,9 @@ async def test_purge_loop_logs_both_counts_through_their_own_loggers(
     caplog.set_level(logging.INFO)
     monkeypatch.setattr(app_module, "_PURGE_INTERVAL_SECONDS", 0.0)
     task = asyncio.create_task(
-        app_module._purge_loop(registry, lambda: T0, tmp_path, lambda: None)
+        app_module._purge_loop(
+            registry, lambda: T0, tmp_path, lambda: None, app_module.MAX_AGE_SECONDS
+        )
     )
     try:
         for _ in range(100):

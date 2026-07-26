@@ -50,7 +50,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "그다음 플러그인 설정, 그다음 ~/.mcp-test-server/logs 를 쓴다"
         ),
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--log-retention-days",
+        type=int,
+        default=3,
+        help="로그 파일을 며칠 보관할지. 이보다 오래된 파일을 지운다 (기본 3)",
+    )
+    args = parser.parse_args(argv)
+    if args.log_retention_days <= 0:
+        # 0을 허용하면 방금 쓴 줄이 다음 스윕에 지워진다.
+        parser.error("--log-retention-days 는 1 이상의 정수여야 한다")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -78,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
                 admin_port=args.admin_port,
                 stale_after=args.stale_after,
                 handle=handle,
+                log_max_age_seconds=args.log_retention_days * 86400,
             )
         )
     except PortInUse as exc:

@@ -255,3 +255,39 @@ def test_tail_seeks_to_correct_byte_offset(tmp_path: Path) -> None:
     result = tail_lines(path, lines=20, max_bytes=60)
     expected = [f"{i:04d}" for i in range(39, 50)]
     assert result == expected
+
+
+def _aged_log(log_dir: Path, day_offset: int, hours_old: float, now: datetime) -> Path:
+    """LOG_GLOB 에 맞는 파일 하나를 만들고 mtime 을 hours_old 만큼 되돌린다."""
+    path = log_dir / log_file_name(8765, (now + timedelta(days=day_offset)).date())
+    path.write_text("x\n", encoding="utf-8")
+    stamp = (now - timedelta(hours=hours_old)).timestamp()
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_one_day_retention_deletes_two_day_old_and_keeps_twelve_hour_old(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc)
+    old = _aged_log(tmp_path, -2, 48, now)
+    fresh = _aged_log(tmp_path, 0, 12, now)
+
+    removed, _ = purge_logs(tmp_path, now, max_age_seconds=1 * 86400)
+
+    assert removed == 1
+    assert not old.exists()
+    assert fresh.exists()
+
+
+def test_default_retention_is_still_seventy_two_hours(tmp_path: Path) -> None:
+    # 회귀. 플래그를 주지 않은 경로가 예전과 같아야 한다.
+    now = datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc)
+    inside = _aged_log(tmp_path, -2, 71, now)
+    outside = _aged_log(tmp_path, -4, 73, now)
+
+    removed, _ = purge_logs(tmp_path, now)
+
+    assert removed == 1
+    assert inside.exists()
+    assert not outside.exists()
