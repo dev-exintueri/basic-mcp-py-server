@@ -154,6 +154,39 @@ def test_control_characters_in_the_path_cannot_forge_a_log_line(server) -> None:
     assert forged == [], f"위조된 줄이 생겼다: {forged}"
 
 
+def test_control_characters_in_a_malformed_body_cannot_forge_a_log_line(server) -> None:
+    """오류 처리기가 예외 메시지를 그대로 로그에 넘겨도 위조·은폐가 안 된다.
+
+    위 test_control_characters_in_the_path_cannot_forge_a_log_line 은 경로를
+    통해 캐리지 리턴과 줄바꿈을 심는다. 이 테스트는 다른 통로다 —
+    **유효한 토큰**(이 서버의 인증 전부)으로 본문에 진짜 캐리지 리턴과
+    줄바꿈을 담아 JSON 파싱을 실패시킨다. V8 의 JSON 파서는 오류 메시지에
+    입력 앞부분을 그대로 담을 수 있다 — 그 메시지를 이스케이프 없이
+    로그에 넘기면 본문에 심은 제어 문자가 로그 줄 하나를 둘로 쪼갠다.
+    토큰이 없어도 되는 위 테스트보다 도달 조건이 더 쉽다는 뜻이다.
+    """
+    payload = "ZZZ\r\n2026-01-01T00:00:00Z " + f"{'INFO':<5} {'app':<8} FORGED"
+    httpx.post(
+        server.mcp_url,
+        headers={
+            "Authorization": "Bearer alice",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        },
+        content=payload.encode("utf-8"),
+        timeout=5,
+    )
+
+    # 요청이 실제로 접근 로그에 남았다는 것부터 확인한다 — 이유는 위
+    # test_control_characters_in_the_path_cannot_forge_a_log_line 의 같은
+    # 주석과 동일하다.
+    wait_for(server, "http", r"POST /mcp")
+
+    text = server.log_text()
+    # splitlines() 로 쪼갠 뒤에 검사하지 않는다 — 이유는 위 테스트와 같다.
+    assert "\r" not in text
+
+
 def test_tool_call_without_ctx_logs_unknown_instance(server) -> None:
     """ctx 를 받지 않는 도구(ping)의 호출 로그도 계약이다.
 
