@@ -112,10 +112,19 @@ describe('serve() 의 close() — 종료 상한', () => {
     // 영원히 안 온다 — 서버는 본문을 다 받을 때까지 이 요청을 못 끝낸다.
     // write() 의 콜백으로 로컬 커널이 바이트를 받아들인 시점을 명시적으로
     // 기다린다(그냥 fire-and-forget 으로 두지 않는다).
+    //
+    // Authorization 헤더가 반드시 있어야 한다. authMiddleware 가
+    // express.json() 보다 먼저 도는(I-1) 뒤로는, 토큰 없는 요청이 본문을
+    // 기다리지 않고 즉시 401 로 끝나 버려 "요청이 안 끝난 채 남아 있다"는
+    // 이 테스트의 전제 자체가 성립하지 않는다(실측: 헤더 없이 돌리면
+    // waitForRequestToBeInFlight() 가 그 401 응답을 예상 밖 응답으로
+    // 잡아낸다). 유효한 토큰을 줘서 authMiddleware 를 통과시키고 본문
+    // 파싱 단계에서 멈추게 한다.
     await new Promise<void>((resolve, reject) => {
       socket.write(
         'POST /mcp HTTP/1.1\r\n' +
           'Host: 127.0.0.1\r\n' +
+          'Authorization: Bearer alice\r\n' +
           'Content-Type: application/json\r\n' +
           'Content-Length: 100\r\n' +
           'Connection: keep-alive\r\n' +
@@ -139,8 +148,49 @@ describe('serve() 의 close() — 종료 상한', () => {
       // 안 된 요청이 close() 를 영원히 막아 이 단언이 실패한다 — vitest
       // 테스트 타임아웃(10000ms, 아래 세 번째 인자)으로 FAIL 한다.
       expect(elapsed).toBeLessThan(4000);
+      // 하한이 없으면 "상한이 3초다"와 "상한이 20ms다"를 구별하지 못한다
+      // — GRACEFUL_SHUTDOWN_MS 를 3000 에서 20 으로 바꿔도 close() 가 즉시
+      // 끝나 버리면 위 toBeLessThan(4000) 은 여전히 통과한다(실측: 리뷰가
+      // 이 변이로 12 passed 를 봤다). 2000ms 는 실제 GRACEFUL_SHUTDOWN_MS
+      // 상수(3000)보다는 작고, 종료가 그 상한을 실제로 기다렸다가
+      // closeAllConnections() 로 강제 종료하는 경로를 탔다고 볼 수 있을
+      // 만큼은 큰 값이다.
+      expect(elapsed).toBeGreaterThan(2000);
     } finally {
       socket.destroy();
     }
   }, 10000);
+});
+
+describe('serve() 의 관리 리스너 — 고정 바인딩', () => {
+  // 관리 포트에는 인증이 없다. 루프백 바인딩만이 유일한 방어선이므로,
+  // MCP 리스너가 --host 로 무엇을 받든 관리 리스너는 항상 127.0.0.1 이어야
+  // 한다. app.ts 의 serve() 안 `await listen(adminServer, options.adminPort,
+  // ADMIN_HOST)` 가 그 줄이다 — ADMIN_HOST 를 options.host 로 바꾸면 이
+  // 단언이 깨진다(실측: 리뷰가 그 변이로 vitest 86 passed / conformance
+  // node 35 passed 를 그대로 봤다 — 이 저장소의 다른 어떤 테스트도 이
+  // 회귀를 잡지 못했다).
+  it('MCP 리스너가 0.0.0.0 으로 열려도 관리 리스너는 127.0.0.1 에만 바인딩된다', async () => {
+    const port = await freePort();
+    const adminPort = await freePort();
+    const broadcaster = new LogBroadcaster();
+
+    const handle = await serve({
+      host: '0.0.0.0',
+      port,
+      adminPort,
+      staleAfter: 300,
+      clock: () => new Date(),
+      broadcaster,
+      logDir: null,
+      logFile: () => null,
+      logMaxAgeSeconds: 3 * 86400,
+    });
+
+    try {
+      expect(handle.adminAddress()).toBe('127.0.0.1');
+    } finally {
+      await handle.close();
+    }
+  });
 });
