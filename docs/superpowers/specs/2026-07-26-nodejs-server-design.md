@@ -47,7 +47,9 @@ plugins/mcp-test/
 | 레벨·카테고리 폭 | `{레벨:<5} {카테고리:<8}` 좌측 정렬. `WARNING`→`WARN`, `CRITICAL`→`ERROR` |
 | 카테고리 집합 | `http`, `call`, `registry`, `app` 네 개 |
 | 토큰 마스킹 | 앞 두 글자 + `…`(U+2026, 마침표 세 개가 아니다) + `(sha256:앞8자리)` |
-| 접근 로그 필드 | `<메서드> <경로> <상태> dur_ms=N`, 있을 때만 `instance=` `subject=` `reason=` |
+| 접근 로그 필드 (`http`) | `<메서드> <경로> <상태> dur_ms=N`, 있을 때만 `instance=` `subject=` `reason=`. 400 이상은 WARN |
+| 도구 호출 로그 (`call`) | 성공 `tool=<이름> instance=<id> dur_ms=<N> ok` |
+| 레지스트리 로그 (`registry`) | `connected instance=<id> subject=<마스킹> label=<label>`, `block instance=<id>`, `unblock instance=<id>` |
 | 접근 로그 시점 | 응답 **시작**. SSE 연결도 열리는 순간 `dur_ms≈0` 줄 하나를 남기고 갱신되지 않는다 |
 | 줄 이스케이프 | 조립이 끝난 한 줄에 캐리지 리턴과 줄바꿈을 한 번 건다 |
 | 응답 상태 | 401(빈 토큰) / 403(차단) / 404(모르는 연결 ID) / 303(HTML 폼 리다이렉트), 오류 응답의 `error` 키 존재 |
@@ -57,7 +59,7 @@ plugins/mcp-test/
 | `session_view` | 키 10개(`instance_id` `subject` `project` `label` `mcp_session_id` `connected_at` `last_seen` `call_count` `blocked` `stale`)와 각 타입 |
 | 관리 라우트 | `/`, `/api/status`, `/fragments/sessions`, `/api/logs/stream`, `/api/sessions/{id}/block`, `/api/sessions/{id}/unblock` |
 | 로그 파일명 | `mcp-test-server.<포트>.<날짜>.log`, 날짜 롤오버 |
-| 로그 경로 우선순위 | `--log-dir` > `$MCP_TEST_LOG_DIR` > `settings.json` 의 `pluginConfigs["mcp-test@*"].options.log_dir` > `~/.mcp-test-server/logs` |
+| 로그 경로 우선순위 | `--log-dir` > `$MCP_TEST_LOG_DIR` > `~/.mcp-test-server/logs`. **`settings.json` 층은 여기 없다** — §3.2 참조 |
 | 보관 스윕 | mtime 기준, `mcp-test-server.*.log` 패턴만, 비재귀, 열린 파일 제외 |
 | CLI 플래그 | `--host --port --admin-port --stale-after --log-dir --log-retention-days`, 그리고 `--log-retention-days 0` 거부 |
 | 노출 경고 | 루프백 밖 바인딩 시 stderr 경고 |
@@ -71,6 +73,14 @@ plugins/mcp-test/
 | 관리 페이지 HTML 전체 | CSS·공백·스크립트는 제외. `/fragments/sessions` 가 **같은 열 제목과 이스케이프된 같은 값**을 담는 것만 본다 |
 | `ping.pid` 의 값 | 값이 아니라 타입만 본다 |
 | 내부 파일 구성 | 노드는 노드 관용구를 따른다. 파일 이름·개수·분할을 맞추지 않는다 |
+| 도구 실패 로그의 `error=` | 파이썬은 예외 **클래스 이름**을 적는다(`_logged`). 두 언어의 예외 이름이 같을 이유가 없다. WARN 레벨과 `tool=` `instance=` `dur_ms=` 까지만 본다 |
+| `settings.json` 의 `log_dir` 층 | 아래 참조 |
+
+**`settings.json` 층을 계약에서 뺀 이유.** `logpaths.py` 는 이 경로를 `Path.home()/".claude"/"settings.json"` 으로 하드코딩하고, 주입 지점은 `resolve_log_dir(settings_path=...)` 라는 **파이썬 함수 인자뿐**이다. 적합성 스위트는 CLI 와 HTTP 로만 서버를 몬다 — 진짜 `~/.claude/settings.json` 에 쓰지 않고는 이 층을 건드릴 수 없다.
+
+계약해 놓고 검증할 수 없는 항목을 표에 남겨 두지 않는다. 이 층은 **각 런타임의 자기 단위 테스트**가 덮는다. 노드도 같은 우선순위와 같은 키 경로(`pluginConfigs["mcp-test@*"].options.log_dir`)를 구현하되, 그 사실은 스위트가 아니라 `server-node/tests/` 가 보증한다.
+
+나중에 이 층까지 스위트로 옮기고 싶으면 두 런타임에 `MCP_TEST_SETTINGS_PATH` 같은 주입 통로를 함께 내면 된다. 지금 만들지 않을 뿐, 길을 막지는 않는다.
 
 ### 3.3 파이썬 쪽 변경
 
@@ -127,6 +137,8 @@ pytest 로 쓴다. `server/tests/test_acceptance.py` 에 서버를 subprocess �
 
 **`express.json()` 은 POST 에만 건다.** GET(SSE 스트림)까지 걸면 transport 가 읽어야 할 스트림이 소진된다. MCP SDK 의 `handleRequest(req, res, body)` 는 POST 에서만 파싱된 본문을 받는다.
 
+**노드 transport 는 stateful 이어야 한다.** `sessionIdGenerator: () => randomUUID()` 를 준다. SDK 예제에 자주 보이는 `sessionIdGenerator: undefined`(stateless)를 쓰면 세션 ID 가 발급되지 않아 `session_view.mcp_session_id` 가 영원히 null 이 된다 — 계약한 필드의 타입이 뒤집히고 DELETE 경로도 성립하지 않는다.
+
 그리고 파이썬에는 없던 몫이 하나 생긴다. **세션별 transport 라우팅.** 파이썬은 `mcp.streamable_http_app()` 이 내부에서 처리하지만, 노드는 `Map<mcpSessionId, transport>` 를 직접 관리해야 한다. 이것은 `Registry` 와 별개다 — `Registry` 는 `X-Client-Instance` 로 세는 우리 개념이고, transport Map 은 MCP 프로토콜의 `Mcp-Session-Id` 로 도는 SDK 사정이다. **둘을 섞지 않는다.**
 
 ## 7. 주석 규약
@@ -159,7 +171,7 @@ pytest 로 쓴다. `server/tests/test_acceptance.py` 에 서버를 subprocess �
 |---|---|
 | 1. MCP 핵심 | `/mcp`, 도구 4개, 401/403, 레지스트리, `X-Client-*` 헤더, 세션별 transport 라우팅 |
 | 2. 관리 API | `/api/status`(+`runtime`), `/fragments/sessions`, block/unblock, 인덱스 페이지 |
-| 3. 로깅 | 줄 형식, 카테고리, 마스킹, 파일명·롤오버, 경로 우선순위 4단계, 보관 스윕, SSE 스트림, 접근 로그 시점 |
+| 3. 로깅 | 줄 형식 세 종류(`http` `call` `registry`), 카테고리, 마스킹, 파일명·롤오버, 경로 우선순위(스위트는 3단계, `settings.json` 층은 노드 단위 테스트), 보관 스윕, SSE 스트림, 접근 로그 시점 |
 
 슬라이스 1 이 끝나면 노드에서 `ping` 이 도는 것을 눈으로 확인할 수 있다. 중단해도 안전한 지점이 슬라이스 경계마다 있다.
 
